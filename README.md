@@ -15,7 +15,7 @@ There's power in AI in that you can "throw a problem at it" and get some result,
 - output contraints: sometimes doesn't return all the data you asked it to review
 - subjectivity in scoring: has a really hard time assigning a numeric score to an individual item
 
-We built raink to circumvent those issues and solve general ranking problems that are otherwise difficult for LLMs to process. See [Patch Perfect: Harmonizing with LLMs to Find Security Vulns](https://www.youtube.com/watch?v=IBuL1zY69tY) for more background.
+We built raink to circumvent those issues and solve general ranking problems that are otherwise difficult for LLMs to process. See our blog post [raink: Use LLMs for Document Ranking](https://bishopfox.com/blog/raink-llms-document-ranking) for more background on this technique, and our talk [Patch Perfect: Harmonizing with LLMs to Find Security Vulns](https://www.youtube.com/watch?v=IBuL1zY69tY) to see how we've applied raink to offensive security problems.
 
 ## Getting started
 
@@ -73,8 +73,10 @@ raink \
 
 ### See also
 
-- https://cohere.com/blog/rerank-3pt5
-- https://www.youtube.com/watch?v=IBuL1zY69tY
+- [raink: Use LLMs for Document Ranking](https://bishopfox.com/blog/raink-llms-document-ranking)
+- [Patch Perfect: Harmonizing with LLMs to Find Security Vulns](https://www.youtube.com/watch?v=IBuL1zY69tY)
+- [Large Language Models are Effective Text Rankers with Pairwise Ranking Prompting](https://arxiv.org/html/2306.17563v2)
+- [Introducing Rerank 3.5: Precise AI Search](https://cohere.com/blog/rerank-3pt5)
 
 ### To-do
 
@@ -89,6 +91,8 @@ raink \
 - [x] explore "tournament" sort vs complete exposure each time
 - [ ] add parameter for refinement ratio
 - [ ] add blog link
+- [ ] support non-OpenAI models
+- [ ] add boolean refinement flag
 
 ### License
 
