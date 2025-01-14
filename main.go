@@ -93,10 +93,11 @@ func main() {
 	batchSize := flag.Int("s", 10, "Batch size")
 	numRuns := flag.Int("r", 10, "Number of runs")
 	initialPrompt := flag.String("p", "", "Initial prompt")
+	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	flag.Parse()
 
 	if *inputFile == "" {
-		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>]")
+		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [--ollama-model <model_name>]")
 		return
 	}
 
@@ -174,7 +175,7 @@ func main() {
 	}
 
 	// Recursive processing
-	finalResults := recursiveProcess(objects, currentBatchSize, *numRuns, *initialPrompt, rng, 1)
+	finalResults := recursiveProcess(objects, currentBatchSize, *numRuns, *initialPrompt, rng, 1, ollamaModel)
 
 	// Add the rank key to each final result based on its position in the list
 	for i := range finalResults {
@@ -189,7 +190,7 @@ func main() {
 	fmt.Println(string(jsonResults))
 }
 
-func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, depth int) []FinalResult {
+func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, depth int, ollamaModel *string) []FinalResult {
 	// If we have only one object, return it with the highest score
 	if len(objects) == 1 {
 		return []FinalResult{
@@ -207,7 +208,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 	}
 
 	// Process the objects and get the sorted results
-	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng)
+	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng, ollamaModel)
 
 	mid := len(results) / 2
 	topHalf := results[:mid]
@@ -223,7 +224,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 		topHalfObjects = append(topHalfObjects, Object{ID: result.Key, Value: result.Value})
 	}
 
-	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, initialPrompt, rng, depth+1)
+	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, initialPrompt, rng, depth+1, ollamaModel)
 
 	// Adjust scores by recursion depth
 	for i := range refinedTopHalf {
@@ -241,7 +242,7 @@ func logRunBatch(runNumber, totalRuns, batchNumber, totalBatches int, message st
 	log.Printf(formattedMessage, args...)
 }
 
-func processObjects(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand) []FinalResult {
+func processObjects(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, ollamaModel *string) []FinalResult {
 	scores := make(map[string][]float64)
 
 	totalBatches := len(objects) / batchSize
@@ -285,11 +286,11 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 		}
 
 		// Split into groups of batchSize and process them concurrently
-		log.Printf("Run %d/%d: Submitting batches to OpenAI API\n", i+1, numRuns)
+		log.Printf("Run %d/%d: Submitting batches to API\n", i+1, numRuns)
 		for j := 0; j < totalBatches; j++ {
 			group := objects[j*batchSize : (j+1)*batchSize]
 			go func(runNumber, batchNumber int, group []Object) {
-				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt)
+				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt, ollamaModel)
 				resultsChan <- rankedGroup
 			}(i+1, j+1, group)
 		}
@@ -370,26 +371,28 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 	return len(encoding.Encode(prompt, nil, nil))
 }
 
-func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string) []RankedObject {
-	prompt := initialPrompt + rankDisclaimer
-	for _, obj := range group {
-		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
-	}
+func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string, ollamaModel *string) []RankedObject {
+    prompt := initialPrompt + rankDisclaimer
+    for _, obj := range group {
+        prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+    }
 
-	inputIDs := make(map[string]bool)
-	for _, obj := range group {
-		inputIDs[obj.ID] = true
-	}
+    var response string
+    if ollamaModel != nil && *ollamaModel != "" {
+        response = callOllama(prompt, *ollamaModel, runNumber, totalRuns, batchNumber, totalBatches)
+    } else {
+        inputIDs := make(map[string]bool)
+        for _, obj := range group {
+            inputIDs[obj.ID] = true
+        }
+        response = callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
+    }
 
-	response := callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
-
-	var rankedResponse RankedObjectResponse
-	err := json.Unmarshal([]byte(response), &rankedResponse)
-	if err != nil {
-		logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Error unmarshalling response: %v\n", err)
-		logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Response: %s\n", response)
-		panic(err)
-	}
+    var rankedResponse RankedObjectResponse
+    err := json.Unmarshal([]byte(response), &rankedResponse)
+    if err != nil {
+        log.Fatalf("Error unmarshalling response: %v\nResponse: %s\n", err, response)
+    }
 
 	// Assign scores based on position in the ranked list
 	var rankedObjects []RankedObject
@@ -575,4 +578,74 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 		completion.Usage.PromptTokens, completion.Usage.CompletionTokens, completion.Usage.TotalTokens)
 
 	return completion.Choices[0].Message.Content
+}
+
+func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int) string {
+    apiURL := "http://localhost:11434/api/chat"
+
+    requestBody, err := json.Marshal(map[string]interface{}{
+        "model":   model,
+        "stream": false,
+        "messages": []map[string]interface{}{
+            {"role": "user", "content": prompt},
+        },
+    })
+    if err != nil {
+        log.Fatalf("Error creating Ollama API request body: %v", err)
+    }
+
+    req, err := http.NewRequest("POST", apiURL, bytes.NewReader(requestBody))
+    if err != nil {
+        log.Fatalf("Error creating Ollama API request: %v", err)
+    }
+    req.Header.Set("Content-Type", "application/json")
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        log.Fatalf("Error making request to Ollama API: %v", err)
+    }
+    defer resp.Body.Close()
+
+    if resp.StatusCode != http.StatusOK {
+        body, _ := io.ReadAll(resp.Body)
+        log.Fatalf("Ollama API returned an error: %v, body: %s", resp.StatusCode, body)
+    }
+
+    responseBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Fatalf("Error reading Ollama API response body: %v", err)
+    }
+
+    var result struct {
+        Message struct {
+            Content string `json:"content"`
+        } `json:"message"`
+    }
+
+    err = json.Unmarshal(responseBody, &result)
+    if err != nil {
+        log.Fatalf("Error parsing Ollama API response: %v", err)
+    }
+
+    lines := strings.Split(result.Message.Content, "\n")
+    var ids []string
+    for _, line := range lines {
+        line = strings.TrimSpace(line)
+        if strings.HasPrefix(line, "id: ") {
+            id := strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+            ids = append(ids, id)
+        }
+    }
+
+    response := RankedObjectResponse{
+        Objects: ids,
+    }
+
+    jsonResponse, err := json.Marshal(response)
+    if err != nil {
+        log.Fatalf("Error creating JSON response: %v", err)
+    }
+
+    return string(jsonResponse)
 }
