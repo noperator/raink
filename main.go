@@ -48,12 +48,10 @@ type RankedObject struct {
 	Score  float64
 }
 
-// Define the schema for the expected response
 type RankedObjectResponse struct {
 	Objects []string `json:"objects" jsonschema_description:"List of ranked object IDs"`
 }
 
-// Add this definition at the top of the file where other types are defined
 type FinalResult struct {
 	Key      string  `json:"key"`
 	Value    string  `json:"value"`
@@ -72,7 +70,6 @@ func GenerateSchema[T any]() interface{} {
 	return schema
 }
 
-// Generate the JSON schema at initialization time
 var RankedObjectResponseSchema = GenerateSchema[RankedObjectResponse]()
 
 func ShortDeterministicID(input string, length int) string {
@@ -90,17 +87,14 @@ func ShortDeterministicID(input string, length int) string {
 }
 
 func main() {
-	// Set log output to stderr
 	log.SetOutput(os.Stderr)
 
-	// Define command-line flags
 	inputFile := flag.String("f", "", "Input file")
 	batchSize := flag.Int("s", 10, "Batch size")
 	numRuns := flag.Int("r", 10, "Number of runs")
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	flag.Parse()
 
-	// Check if input file is provided
 	if *inputFile == "" {
 		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>]")
 		return
@@ -127,10 +121,8 @@ func main() {
 		objects = append(objects, Object{ID: id, Value: line})
 	}
 
-	// Initialize random seed
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	// Initialize tiktoken encoding
 	encoding, err := tiktoken.GetEncoding(encoding)
 	if err != nil {
 		log.Fatal("Failed to get tiktoken encoding:", err)
@@ -189,13 +181,11 @@ func main() {
 		finalResults[i].Rank = i + 1
 	}
 
-	// Marshal the final results into JSON
 	jsonResults, err := json.MarshalIndent(finalResults, "", "  ")
 	if err != nil {
 		panic(err)
 	}
 
-	// Print the final results in JSON format
 	fmt.Println(string(jsonResults))
 }
 
@@ -218,26 +208,21 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 
 	// Process the objects and get the sorted results
 	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng)
-	// return results
 
-	// Split the results into top half and bottom half
 	mid := len(results) / 2
 	topHalf := results[:mid]
 	bottomHalf := results[mid:]
 
-	// Log the top items being sent back into recursion
 	log.Println("Top items being sent back into recursion:")
 	for i, obj := range topHalf {
 		log.Printf("Rank %d: ID=%s, Score=%.2f, Value=%s", i+1, obj.Key, obj.Score, obj.Value)
 	}
 
-	// Convert topHalf back to objects
 	var topHalfObjects []Object
 	for _, result := range topHalf {
 		topHalfObjects = append(topHalfObjects, Object{ID: result.Key, Value: result.Value})
 	}
 
-	// Recursively process the top half
 	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, initialPrompt, rng, depth+1)
 
 	// Adjust scores by recursion depth
@@ -245,7 +230,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 		refinedTopHalf[i].Score /= float64(2 * depth)
 	}
 
-	// Combine the refined top half with the bottom half
+	// Combine the refined top half with the unrefined bottom half
 	finalResults := append(refinedTopHalf, bottomHalf...)
 
 	return finalResults
@@ -257,21 +242,17 @@ func logRunBatch(runNumber, totalRuns, batchNumber, totalBatches int, message st
 }
 
 func processObjects(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand) []FinalResult {
-	// Store scores for each object
 	scores := make(map[string][]float64)
 
-	totalBatches := len(objects) / batchSize // Calculate total batches
+	totalBatches := len(objects) / batchSize
 
-	// Initialize a map to keep track of exposure counts
 	exposureCounts := make(map[string]int)
 
-	// Create a channel to collect results from goroutines
 	resultsChan := make(chan []RankedObject, totalBatches)
 
 	var firstRunRemainderItems []Object
 
 	for i := 0; i < numRuns; i++ {
-		// Shuffle the objects
 		rng.Shuffle(len(objects), func(i, j int) {
 			objects[i], objects[j] = objects[j], objects[i]
 		})
@@ -285,7 +266,6 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 				for _, item := range remainderItems {
 					for _, firstRunItem := range firstRunRemainderItems {
 						if item.ID == firstRunItem.ID {
-							// log both matching items
 							log.Printf("Conflicting remainder item found: %v, %v\n", item, firstRunItem)
 							conflictFound = true
 							break
@@ -298,7 +278,6 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 				if !conflictFound {
 					break
 				}
-				// time.Sleep(1 * time.Second)
 				rng.Shuffle(len(objects), func(i, j int) {
 					objects[i], objects[j] = objects[j], objects[i]
 				})
@@ -360,7 +339,6 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 		}
 	}
 
-	// Sort results by score in ascending order
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score < results[j].Score
 	})
@@ -393,22 +371,18 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 }
 
 func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string) []RankedObject {
-	// Prepare the prompt for OpenAI API
 	prompt := initialPrompt + rankDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
 
-	// Collect input IDs
 	inputIDs := make(map[string]bool)
 	for _, obj := range group {
 		inputIDs[obj.ID] = true
 	}
 
-	// Call OpenAI API
 	response := callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
 
-	// Define a struct to match the response format
 	var rankedResponse RankedObjectResponse
 	err := json.Unmarshal([]byte(response), &rankedResponse)
 	if err != nil {
@@ -434,12 +408,11 @@ func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, to
 	return rankedObjects
 }
 
-// CustomTransport is a custom HTTP transport that logs response headers and intercepts the response.
 type CustomTransport struct {
 	Transport  http.RoundTripper
 	Headers    http.Header
 	StatusCode int
-	Body       []byte // Add a field to store the response body
+	Body       []byte
 }
 
 func (t *CustomTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -448,17 +421,14 @@ func (t *CustomTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	// Store the headers and status code for later use
 	t.Headers = resp.Header
 	t.StatusCode = resp.StatusCode
 
-	// Read and store the response body
 	t.Body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	// Replace the response body with a new reader
 	resp.Body = io.NopCloser(bytes.NewBuffer(t.Body))
 
 	return resp, nil
@@ -470,14 +440,13 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 		log.Fatal("OPENAI_API_KEY environment variable not set")
 	}
 
-	// Create a custom HTTP client with the custom transport
 	customTransport := &CustomTransport{Transport: http.DefaultTransport}
 	customClient := &http.Client{Transport: customTransport}
 
 	client := openai.NewClient(
 		option.WithAPIKey(apiKey),
 		option.WithHTTPClient(customClient),
-		option.WithMaxRetries(5), // Set the maximum number of retries
+		option.WithMaxRetries(5),
 	)
 
 	var completion *openai.ChatCompletion
@@ -538,28 +507,24 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 			}
 
 			if len(missingIDs) == 0 {
-				// All IDs matched, return the corrected response
 				correctedResponse, err := json.Marshal(rankedResponse)
 				if err != nil {
 					log.Fatalf("Run %d/%d, Batch %d/%d: Error marshalling corrected response: %v", runNumber, totalRuns, batchNumber, totalBatches, err)
 				}
 				return string(correctedResponse)
 			} else {
-				// Convert missingIDs map keys to a slice for logging
 				missingIDsKeys := make([]string, 0, len(missingIDs))
 				for id := range missingIDs {
 					missingIDsKeys = append(missingIDsKeys, id)
 				}
 				log.Printf("Run %d/%d, Batch %d/%d: Missing IDs: %v; response: %v\n", runNumber, totalRuns, batchNumber, totalBatches, missingIDsKeys, rankedResponse)
 
-				// Update the prompt with a new message about missing IDs
 				missingIDsMessage := fmt.Sprintf("\n\nYou're missing the following IDs: %v. Try again—and make ABSOLUTELY SURE you're returning the IDs and NOT THE VALUES!", missingIDsKeys)
 				prompt += missingIDsMessage
 				continue
 			}
 		}
 
-		// Handle context deadline exceeded error
 		if err == context.DeadlineExceeded {
 			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Context deadline exceeded, retrying...")
 			time.Sleep(backoff)
@@ -567,7 +532,6 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 			continue
 		}
 
-		// Check the status code and rate limit headers
 		if customTransport.StatusCode == http.StatusTooManyRequests {
 			for key, values := range customTransport.Headers {
 				if strings.HasPrefix(key, "X-Ratelimit") {
@@ -607,7 +571,6 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 
 	logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Received response from OpenAI API")
 
-	// Log the number of tokens used
 	logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Tokens used - Prompt: %d, Completion: %d, Total: %d",
 		completion.Usage.PromptTokens, completion.Usage.CompletionTokens, completion.Usage.TotalTokens)
 
