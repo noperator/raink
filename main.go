@@ -581,11 +581,15 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 }
 
 func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int) string {
-    apiURL := "http://localhost:11434/api/chat"
+    apiURL := os.Getenv("OLLAMA_API_URL")
+    if apiURL == "" {
+        apiURL = "http://localhost:11434/api/chat"
+    }
 
     requestBody, err := json.Marshal(map[string]interface{}{
         "model":   model,
         "stream": false,
+        "format": "json",
         "messages": []map[string]interface{}{
             {"role": "user", "content": prompt},
         },
