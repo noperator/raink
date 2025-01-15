@@ -621,24 +621,34 @@ func callOllama(prompt string, model string, runNumber int, totalRuns int, batch
         log.Fatalf("Error reading Ollama API response body: %v", err)
     }
 
-    var result struct {
+    var ollamaResponse struct {
         Message struct {
             Content string `json:"content"`
         } `json:"message"`
     }
 
-    err = json.Unmarshal(responseBody, &result)
+    err = json.Unmarshal(responseBody, &ollamaResponse)
     if err != nil {
         log.Fatalf("Error parsing Ollama API response: %v", err)
     }
 
-    lines := strings.Split(result.Message.Content, "\n")
     var ids []string
+    lines := strings.Split(ollamaResponse.Message.Content, "\n")
     for _, line := range lines {
         line = strings.TrimSpace(line)
         if strings.HasPrefix(line, "id: ") {
             id := strings.TrimSpace(strings.TrimPrefix(line, "id:"))
             ids = append(ids, id)
+        } else if strings.Contains(line, `"`) {
+            words := strings.FieldsFunc(line, func(r rune) bool {
+                return r == '"' || r == ',' || r == '[' || r == ']'
+            })
+            for _, word := range words {
+                word = strings.TrimSpace(word)
+                if len(word) == idLen {
+                    ids = append(ids, word)
+                }
+            }
         }
     }
 
