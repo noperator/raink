@@ -25,6 +25,8 @@ import (
 	"github.com/pkoukk/tiktoken-go"
 )
 
+// TODO: Move these attributes to CLI args.
+
 // https://platform.openai.com/docs/models/gp#models-overview
 const maxTokens = 128000
 const tokenLimitThreshold = 0.95 * maxTokens
@@ -210,6 +212,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 	// Process the objects and get the sorted results
 	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng, ollamaModel)
 
+	// TODO: Move this ratio (50%) to a CLI arg.
 	mid := len(results) / 2
 	topHalf := results[:mid]
 	bottomHalf := results[mid:]
@@ -237,6 +240,7 @@ func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt st
 	return finalResults
 }
 
+// TODO: Also log the "round" number (i.e., the repeated recursion depth).
 func logRunBatch(runNumber, totalRuns, batchNumber, totalBatches int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: "+message, len(strconv.Itoa(totalRuns)), runNumber, totalRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
 	log.Printf(formattedMessage, args...)
@@ -286,10 +290,12 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 		}
 
 		// Split into groups of batchSize and process them concurrently
-		log.Printf("Run %d/%d: Submitting batches to API\n", i+1, numRuns)
+		log.Printf("Run %*d/%d: Submitting batches to API\n", len(strconv.Itoa(numRuns)), i+1, numRuns)
 		for j := 0; j < totalBatches; j++ {
 			group := objects[j*batchSize : (j+1)*batchSize]
 			go func(runNumber, batchNumber int, group []Object) {
+				// formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: Submitting batch to API\n", len(strconv.Itoa(numRuns)), runNumber, numRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
+				// log.Printf(formattedMessage)
 				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt, ollamaModel)
 				resultsChan <- rankedGroup
 			}(i+1, j+1, group)
@@ -359,12 +365,35 @@ func logTokenSizes(group []Object, initialPrompt string, encoding *tiktoken.Tikt
 	}
 }
 
-const promptFmt = "id: %s\nvalue:\n```\n%s\n```\n\n"
+const promptFmt = "id: `%s`\nvalue:\n```\n%s\n```\n\n"
 
-var rankDisclaimer = fmt.Sprintf("\n\nREMEMBER to:\n- always respond with the short %d-character ID of each item found above the value, like `id: <ID>`—NEVER respond with the actual value!\n- respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT.\n\n", idLen)
+// TODO: Merge these and clean them up.
+
+var promptDisclaimer = fmt.Sprintf(
+	"\n\nREMEMBER to:\n"+
+		"- ALWAYS respond with the short %d-character ID of each item found above the value "+
+		"(i.e., I'll provide you with `id: <ID>` above the value, and you should respond with that same ID in your response)\n"+
+		"— NEVER respond with the actual value!\n"+
+		"— NEVER include backticks around IDs in your response!\n"+
+		"— NEVER include scores or a written reason/justification in your response!\n"+
+		"- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT\n"+
+		"- Respond in JSON format, with the following schema:\n  {\"objects\": [\"<ID1>\", \"<ID2>\", ...]}\n\n"+
+		"Here are the objects to be ranked:\n\n",
+	idLen,
+)
+
+const missingIDsStr = "Your last response was missing the following IDs: [%s]. " +
+	"Try again—and make ABSOLUTELY SURE to remember to:\n" +
+	"- ALWAYS return the IDs and NOT THE VALUES! " +
+	"- ALWAYS respond in JSON format as specified! " +
+	"- ALWAYS return ALL of the IDs in the list!" +
+	"- NEVER include backticks around IDs in your response!" +
+	"— NEVER include scores or a written reason/justification in your response!"
+
+const invalidJSONStr = "Your last response was not valid JSON. Try again!"
 
 func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tiktoken) int {
-	prompt := initialPrompt + rankDisclaimer
+	prompt := initialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
@@ -372,27 +401,21 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 }
 
 func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string, ollamaModel *string) []RankedObject {
-    prompt := initialPrompt + rankDisclaimer
-    for _, obj := range group {
-        prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
-    }
+	prompt := initialPrompt + promptDisclaimer
+	for _, obj := range group {
+		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+	}
 
-    var response string
-    if ollamaModel != nil && *ollamaModel != "" {
-        response = callOllama(prompt, *ollamaModel, runNumber, totalRuns, batchNumber, totalBatches)
-    } else {
-        inputIDs := make(map[string]bool)
-        for _, obj := range group {
-            inputIDs[obj.ID] = true
-        }
-        response = callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
-    }
-
-    var rankedResponse RankedObjectResponse
-    err := json.Unmarshal([]byte(response), &rankedResponse)
-    if err != nil {
-        log.Fatalf("Error unmarshalling response: %v\nResponse: %s\n", err, response)
-    }
+	var rankedResponse RankedObjectResponse
+	inputIDs := make(map[string]bool)
+	for _, obj := range group {
+		inputIDs[obj.ID] = true
+	}
+	if ollamaModel != nil && *ollamaModel != "" {
+		rankedResponse = callOllama(prompt, *ollamaModel, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
+	} else {
+		rankedResponse = callOpenAI(prompt, runNumber, totalRuns, batchNumber, totalBatches, inputIDs)
+	}
 
 	// Assign scores based on position in the ranked list
 	var rankedObjects []RankedObject
@@ -437,7 +460,43 @@ func (t *CustomTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, totalBatches int, inputIDs map[string]bool) string {
+// Updates the rankedResponse in place to fix case-insensitive ID mismatches. If any IDs are missing, returns the missing IDs along with an error.
+func validateIDs(rankedResponse *RankedObjectResponse, inputIDs map[string]bool) ([]string, error) {
+	// Create a map for case-insensitive ID matching
+	inputIDsLower := make(map[string]string)
+	for id := range inputIDs {
+		inputIDsLower[strings.ToLower(id)] = id
+	}
+
+	missingIDs := make(map[string]bool)
+	for id := range inputIDs {
+		missingIDs[id] = true
+	}
+
+	for i, id := range rankedResponse.Objects {
+		id = strings.ReplaceAll(id, "`", "")
+		lowerID := strings.ToLower(id)
+		if correctID, found := inputIDsLower[lowerID]; found {
+			if correctID != id {
+				// Replace the case-wrong match with the correct ID
+				rankedResponse.Objects[i] = correctID
+			}
+			delete(missingIDs, correctID)
+		}
+	}
+
+	if len(missingIDs) == 0 {
+		return nil, nil
+	} else {
+		missingIDsKeys := make([]string, 0, len(missingIDs))
+		for id := range missingIDs {
+			missingIDsKeys = append(missingIDsKeys, id)
+		}
+		return missingIDsKeys, fmt.Errorf("missing IDs: %s", strings.Join(missingIDsKeys, ", "))
+	}
+}
+
+func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, totalBatches int, inputIDs map[string]bool) RankedObjectResponse {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		log.Fatal("OPENAI_API_KEY environment variable not set")
@@ -452,18 +511,19 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 		option.WithMaxRetries(5),
 	)
 
-	var completion *openai.ChatCompletion
-	var err error
 	backoff := time.Second
 
+	conversationHistory := []openai.ChatCompletionMessageParamUnion{
+		openai.UserMessage(prompt),
+	}
+
+	var rankedResponse RankedObjectResponse
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		completion, err = client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-			Messages: openai.F([]openai.ChatCompletionMessageParamUnion{
-				openai.UserMessage(prompt),
-			}),
+		completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+			Messages: openai.F(conversationHistory),
 			ResponseFormat: openai.F[openai.ChatCompletionNewParamsResponseFormatUnion](
 				openai.ResponseFormatJSONSchemaParam{
 					Type: openai.F(openai.ResponseFormatJSONSchemaTypeJSONSchema),
@@ -478,54 +538,34 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 			Model: openai.F(model),
 		})
 		if err == nil {
-			// Check if all input object IDs are present in the response
-			var rankedResponse RankedObjectResponse
+
+			conversationHistory = append(conversationHistory,
+				openai.AssistantMessage(completion.Choices[0].Message.Content),
+			)
+
 			err = json.Unmarshal([]byte(completion.Choices[0].Message.Content), &rankedResponse)
 			if err != nil {
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Error unmarshalling response: %v\n", err)
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Response: %s\n", completion.Choices[0].Message.Content)
+				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+				conversationHistory = append(conversationHistory,
+					openai.UserMessage(invalidJSONStr),
+				)
+				trimmedContent := strings.TrimSpace(completion.Choices[0].Message.Content)
+				log.Printf("Ollama API response: %s", trimmedContent)
 				continue
 			}
 
-			// Create a map for case-insensitive ID matching
-			inputIDsLower := make(map[string]string)
-			for id := range inputIDs {
-				inputIDsLower[strings.ToLower(id)] = id
-			}
-
-			missingIDs := make(map[string]bool)
-			for id := range inputIDs {
-				missingIDs[id] = true
-			}
-
-			for i, id := range rankedResponse.Objects {
-				lowerID := strings.ToLower(id)
-				if correctID, found := inputIDsLower[lowerID]; found {
-					if correctID != id {
-						// Replace the case-wrong match with the correct ID
-						rankedResponse.Objects[i] = correctID
-					}
-					delete(missingIDs, correctID)
-				}
-			}
-
-			if len(missingIDs) == 0 {
-				correctedResponse, err := json.Marshal(rankedResponse)
-				if err != nil {
-					log.Fatalf("Run %d/%d, Batch %d/%d: Error marshalling corrected response: %v", runNumber, totalRuns, batchNumber, totalBatches, err)
-				}
-				return string(correctedResponse)
-			} else {
-				missingIDsKeys := make([]string, 0, len(missingIDs))
-				for id := range missingIDs {
-					missingIDsKeys = append(missingIDsKeys, id)
-				}
-				log.Printf("Run %d/%d, Batch %d/%d: Missing IDs: %v; response: %v\n", runNumber, totalRuns, batchNumber, totalBatches, missingIDsKeys, rankedResponse)
-
-				missingIDsMessage := fmt.Sprintf("\n\nYou're missing the following IDs: %v. Try again—and make ABSOLUTELY SURE you're returning the IDs and NOT THE VALUES!", missingIDsKeys)
-				prompt += missingIDsMessage
+			missingIDs, err := validateIDs(&rankedResponse, inputIDs)
+			if err != nil {
+				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+				conversationHistory = append(conversationHistory,
+					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "))),
+				)
+				trimmedContent := strings.TrimSpace(completion.Choices[0].Message.Content)
+				log.Printf("Ollama API response: %s", trimmedContent)
 				continue
 			}
+
+			return rankedResponse
 		}
 
 		if err == context.DeadlineExceeded {
@@ -571,95 +611,104 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 			log.Fatalf("Run %*d/%d, Batch %*d/%d: Unexpected error: %v", len(strconv.Itoa(totalRuns)), runNumber, totalRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches, err)
 		}
 	}
-
-	logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Received response from OpenAI API")
-
-	logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Tokens used - Prompt: %d, Completion: %d, Total: %d",
-		completion.Usage.PromptTokens, completion.Usage.CompletionTokens, completion.Usage.TotalTokens)
-
-	return completion.Choices[0].Message.Content
 }
 
-func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int) string {
-    apiURL := os.Getenv("OLLAMA_API_URL")
-    if apiURL == "" {
-        apiURL = "http://localhost:11434/api/chat"
-    }
+func callOllama(prompt string, model string, runNumber int, totalRuns int, batchNumber int, totalBatches int, inputIDs map[string]bool) RankedObjectResponse {
+	apiURL := os.Getenv("OLLAMA_API_URL")
+	if apiURL == "" {
+		apiURL = "http://localhost:11434/api/chat"
+	}
 
-    requestBody, err := json.Marshal(map[string]interface{}{
-        "model":   model,
-        "stream": false,
-        "format": "json",
-        "messages": []map[string]interface{}{
-            {"role": "user", "content": prompt},
-        },
-    })
-    if err != nil {
-        log.Fatalf("Error creating Ollama API request body: %v", err)
-    }
+	var rankedResponse RankedObjectResponse
 
-    req, err := http.NewRequest("POST", apiURL, bytes.NewReader(requestBody))
-    if err != nil {
-        log.Fatalf("Error creating Ollama API request: %v", err)
-    }
-    req.Header.Set("Content-Type", "application/json")
+	// Initialize the conversation history with the initial prompt
+	conversationHistory := []map[string]interface{}{
+		{"role": "user", "content": prompt},
+	}
 
-    client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        log.Fatalf("Error making request to Ollama API: %v", err)
-    }
-    defer resp.Body.Close()
+	for {
 
-    if resp.StatusCode != http.StatusOK {
-        body, _ := io.ReadAll(resp.Body)
-        log.Fatalf("Ollama API returned an error: %v, body: %s", resp.StatusCode, body)
-    }
+		requestBody, err := json.Marshal(map[string]interface{}{
+			"model":    model,
+			"stream":   false,
+			"format":   "json",
+			"messages": conversationHistory,
+		})
+		if err != nil {
+			log.Fatalf("Error creating Ollama API request body: %v", err)
+		}
 
-    responseBody, err := io.ReadAll(resp.Body)
-    if err != nil {
-        log.Fatalf("Error reading Ollama API response body: %v", err)
-    }
+		req, err := http.NewRequest("POST", apiURL, bytes.NewReader(requestBody))
+		if err != nil {
+			log.Fatalf("Error creating Ollama API request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-    var ollamaResponse struct {
-        Message struct {
-            Content string `json:"content"`
-        } `json:"message"`
-    }
+		client := &http.Client{}
 
-    err = json.Unmarshal(responseBody, &ollamaResponse)
-    if err != nil {
-        log.Fatalf("Error parsing Ollama API response: %v", err)
-    }
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatalf("Error making request to Ollama API: %v", err)
+		}
+		defer resp.Body.Close()
 
-    var ids []string
-    lines := strings.Split(ollamaResponse.Message.Content, "\n")
-    for _, line := range lines {
-        line = strings.TrimSpace(line)
-        if strings.HasPrefix(line, "id: ") {
-            id := strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-            ids = append(ids, id)
-        } else if strings.Contains(line, `"`) {
-            words := strings.FieldsFunc(line, func(r rune) bool {
-                return r == '"' || r == ',' || r == '[' || r == ']'
-            })
-            for _, word := range words {
-                word = strings.TrimSpace(word)
-                if len(word) == idLen {
-                    ids = append(ids, word)
-                }
-            }
-        }
-    }
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Fatalf("Ollama API returned an error: %v, body: %s", resp.StatusCode, body)
+		}
 
-    response := RankedObjectResponse{
-        Objects: ids,
-    }
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatalf("Error reading Ollama API response body: %v", err)
+		}
 
-    jsonResponse, err := json.Marshal(response)
-    if err != nil {
-        log.Fatalf("Error creating JSON response: %v", err)
-    }
+		var ollamaResponse struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		}
 
-    return string(jsonResponse)
+		err = json.Unmarshal(responseBody, &ollamaResponse)
+		if err != nil {
+			log.Fatalf("Error parsing Ollama API response: %v", err)
+		}
+
+		conversationHistory = append(
+			conversationHistory,
+			map[string]interface{}{
+				"role":    "assistant",
+				"content": ollamaResponse.Message.Content,
+			},
+		)
+
+		err = json.Unmarshal([]byte(ollamaResponse.Message.Content), &rankedResponse)
+		if err != nil {
+			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+			conversationHistory = append(conversationHistory,
+				map[string]interface{}{
+					"role":    "user",
+					"content": invalidJSONStr,
+				},
+			)
+			trimmedContent := strings.TrimSpace(ollamaResponse.Message.Content)
+			log.Printf("Ollama API response: %s", trimmedContent)
+			continue
+		}
+
+		missingIDs, err := validateIDs(&rankedResponse, inputIDs)
+		if err != nil {
+			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+			conversationHistory = append(conversationHistory,
+				map[string]interface{}{
+					"role":    "user",
+					"content": fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", ")),
+				},
+			)
+			trimmedContent := strings.TrimSpace(ollamaResponse.Message.Content)
+			log.Printf("Ollama API response: %s", trimmedContent)
+			continue
+		}
+
+		return rankedResponse
+	}
 }
