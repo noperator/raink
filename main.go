@@ -27,6 +27,15 @@ import (
 
 const idLen = 8
 
+/*
+When deciding whether a value belongs in Config or Ranker structs, consider the following:
+- Does this value change during operation? → Ranker if yes, Config if no
+- Should users be able to configure this directly? → Config if yes, Ranker if no
+- Is this derived from other configuration? → Usually Ranker
+- Does this require initialization or cleanup? → Usually Ranker
+- Is this part of the public API? → Config if yes, Ranker if no
+*/
+
 type Config struct {
 	InitialPrompt   string
 	BatchSize       int
@@ -65,9 +74,11 @@ func (c *Config) Validate() error {
 }
 
 type Ranker struct {
-	cfg      *Config
-	encoding *tiktoken.Tiktoken
-	rng      *rand.Rand
+	cfg        *Config
+	encoding   *tiktoken.Tiktoken
+	rng        *rand.Rand
+	numBatches int
+	round      int
 }
 
 func NewRanker(config *Config) (*Ranker, error) {
@@ -229,7 +240,8 @@ func main() {
 		log.Fatal("Failed to get tiktoken encoding:", err)
 	}
 
-	// Adjust batch size upfront
+	// Dynamically adjust batch size upfront.
+	// TODO: Move this to a separate function.
 	currentBatchSize := ranker.cfg.BatchSize
 	for {
 		valid := true
@@ -240,7 +252,6 @@ func main() {
 			ranker.rng.Shuffle(len(objects), func(i, j int) {
 				objects[i], objects[j] = objects[j], objects[i]
 			})
-			// log.Printf("Estimating tokens for batch size %d with object count %d", currentBatchSize, len(objects))
 			totalBatches = len(objects) / currentBatchSize
 			for j := 0; j < totalBatches; j++ {
 				group := objects[j*currentBatchSize : (j+1)*currentBatchSize]
@@ -299,6 +310,10 @@ func main() {
 // large number of other objects.
 
 func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
+	r.round = round
+
+	log.Printf("Round %d: Ranking %d objects\n", r.round, len(objects))
+
 	// If we've narrowed down to a single object, we're done.
 	if len(objects) == 1 {
 		return []FinalResult{
@@ -316,6 +331,8 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	if r.cfg.BatchSize > len(objects) {
 		r.cfg.BatchSize = len(objects)
 	}
+
+	r.numBatches = len(objects) / r.cfg.BatchSize
 
 	// Process the objects and get the sorted results.
 	results := r.shuffleBatchRank(objects)
@@ -362,19 +379,17 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 }
 
 // TODO: Also log the "round" number (i.e., the repeated recursion depth).
-func logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches int, message string, args ...interface{}) {
-	formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: "+message, len(strconv.Itoa(totalRuns)), runNumber, totalRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
+func (r *Ranker) logFromApiCall(runNum, batchNum int, message string, args ...interface{}) {
+	formattedMessage := fmt.Sprintf("Round %d, Run %*d/%d, Batch %*d/%d: "+message, r.round, len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches)
 	log.Printf(formattedMessage, args...)
 }
 
 func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 	scores := make(map[string][]float64)
 
-	totalBatches := len(objects) / r.cfg.BatchSize
-
 	exposureCounts := make(map[string]int)
 
-	resultsChan := make(chan []RankedObject, totalBatches)
+	resultsChan := make(chan []RankedObject, r.numBatches)
 
 	var firstRunRemainderItems []Object
 
@@ -387,7 +402,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 		// range in the second run
 		if i == 1 && len(firstRunRemainderItems) > 0 {
 			for {
-				remainderStart := totalBatches * r.cfg.BatchSize
+				remainderStart := r.numBatches * r.cfg.BatchSize
 				remainderItems := objects[remainderStart:]
 				conflictFound := false
 				for _, item := range remainderItems {
@@ -412,17 +427,17 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 		}
 
 		// Split into groups of batchSize and process them concurrently
-		log.Printf("Run %*d/%d: Submitting batches to API\n", len(strconv.Itoa(r.cfg.NumRuns)), i+1, r.cfg.NumRuns)
-		for j := 0; j < totalBatches; j++ {
+		log.Printf("Round %d, Run %*d/%d: Submitting batches to API\n", r.round, len(strconv.Itoa(r.cfg.NumRuns)), i+1, r.cfg.NumRuns)
+		for j := 0; j < r.numBatches; j++ {
 			batch := objects[j*r.cfg.BatchSize : (j+1)*r.cfg.BatchSize]
 			go func(runNumber, batchNumber int, batch []Object) {
-				rankedBatch := r.rankObjects(batch, runNumber, batchNumber, totalBatches)
+				rankedBatch := r.rankObjects(batch, runNumber, batchNumber)
 				resultsChan <- rankedBatch
 			}(i+1, j+1, batch)
 		}
 
 		// Collect results from all batches
-		for j := 0; j < totalBatches; j++ {
+		for j := 0; j < r.numBatches; j++ {
 			rankedBatch := <-resultsChan
 			for _, rankedObject := range rankedBatch {
 				scores[rankedObject.Object.ID] = append(scores[rankedObject.Object.ID], rankedObject.Score)
@@ -432,7 +447,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 
 		// Save remainder items from the first run
 		if i == 0 {
-			remainderStart := totalBatches * r.cfg.BatchSize
+			remainderStart := r.numBatches * r.cfg.BatchSize
 			if remainderStart < len(objects) {
 				firstRunRemainderItems = make([]Object, len(objects[remainderStart:]))
 				copy(firstRunRemainderItems, objects[remainderStart:])
@@ -520,7 +535,7 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 	return len(encoding.Encode(prompt, nil, nil))
 }
 
-func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int, totalBatches int) []RankedObject {
+func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []RankedObject {
 	prompt := r.cfg.InitialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
@@ -545,9 +560,9 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int, tot
 		inputIDs[obj.ID] = true
 	}
 	if r.cfg.OllamaModel != "" {
-		rankedResponse = r.callOllama(prompt, runNumber, batchNumber, totalBatches, inputIDs)
+		rankedResponse = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
 	} else {
-		rankedResponse = r.callOpenAI(prompt, runNumber, batchNumber, totalBatches, inputIDs)
+		rankedResponse = r.callOpenAI(prompt, runNumber, batchNumber, inputIDs)
 	}
 
 	// Assign scores based on position in the ranked list
@@ -634,7 +649,7 @@ func validateIDs(rankedResponse *RankedObjectResponse, inputIDs map[string]bool)
 	}
 }
 
-func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, totalBatches int, inputIDs map[string]bool) RankedObjectResponse {
+func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs map[string]bool) RankedObjectResponse {
 
 	customTransport := &CustomTransport{Transport: http.DefaultTransport}
 	customClient := &http.Client{Transport: customTransport}
@@ -679,7 +694,7 @@ func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, total
 
 			err = json.Unmarshal([]byte(completion.Choices[0].Message.Content), &rankedResponse)
 			if err != nil {
-				logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Error unmarshalling response: %v\n", err))
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(invalidJSONStr),
 				)
@@ -690,7 +705,7 @@ func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, total
 
 			missingIDs, err := validateIDs(&rankedResponse, inputIDs)
 			if err != nil {
-				logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "))),
 				)
@@ -703,7 +718,7 @@ func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, total
 		}
 
 		if err == context.DeadlineExceeded {
-			logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, "Context deadline exceeded, retrying...")
+			r.logFromApiCall(runNum, batchNum, "Context deadline exceeded, retrying...")
 			time.Sleep(backoff)
 			backoff *= 2
 			continue
@@ -713,16 +728,16 @@ func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, total
 			for key, values := range customTransport.Headers {
 				if strings.HasPrefix(key, "X-Ratelimit") {
 					for _, value := range values {
-						log.Printf("Run %d/%d, Batch %d/%d: Rate limit header: %s: %s", runNumber, r.cfg.NumRuns, batchNumber, totalBatches, key, value)
+						r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Rate limit header: %s: %s", key, value))
 					}
 				}
 			}
 
 			respBody := customTransport.Body
 			if respBody == nil {
-				log.Printf("Run %d/%d, Batch %d/%d: Error reading response body: %v", runNumber, r.cfg.NumRuns, batchNumber, totalBatches, "response body is nil")
+				r.logFromApiCall(runNum, batchNum, "Error reading response body: %v", "response body is nil")
 			} else {
-				log.Printf("Run %d/%d, Batch %d/%d: Response body: %s", runNumber, r.cfg.NumRuns, batchNumber, totalBatches, string(respBody))
+				r.logFromApiCall(runNum, batchNum, "Response body: %s", string(respBody))
 			}
 
 			remainingTokensStr := customTransport.Headers.Get("X-Ratelimit-Remaining-Tokens")
@@ -731,23 +746,23 @@ func (r *Ranker) callOpenAI(prompt string, runNumber int, batchNumber int, total
 			remainingTokens, _ := strconv.Atoi(remainingTokensStr)
 			resetDuration, _ := time.ParseDuration(strings.Replace(resetTokensStr, "s", "s", 1))
 
-			logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, "Rate limit exceeded. Suggested wait time: %v. Remaining tokens: %d", resetDuration, remainingTokens)
+			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Rate limit exceeded. Suggested wait time: %v. Remaining tokens: %d", resetDuration, remainingTokens))
 
 			if resetDuration > 0 {
-				logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", resetDuration)
+				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Waiting for %v before retrying...", resetDuration))
 				time.Sleep(resetDuration)
 			} else {
-				logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", backoff)
+				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Waiting for %v before retrying...", backoff))
 				time.Sleep(backoff)
 				backoff *= 2
 			}
 		} else {
-			log.Fatalf("Run %*d/%d, Batch %*d/%d: Unexpected error: %v", len(strconv.Itoa(r.cfg.NumRuns)), runNumber, r.cfg.NumRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches, err)
+			log.Fatalf("Run %*d/%d, Batch %*d/%d: Unexpected error: %v", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
 		}
 	}
 }
 
-func (r *Ranker) callOllama(prompt string, runNumber int, batchNumber int, totalBatches int, inputIDs map[string]bool) RankedObjectResponse {
+func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs map[string]bool) RankedObjectResponse {
 
 	var rankedResponse RankedObjectResponse
 
@@ -813,7 +828,7 @@ func (r *Ranker) callOllama(prompt string, runNumber int, batchNumber int, total
 
 		err = json.Unmarshal([]byte(ollamaResponse.Message.Content), &rankedResponse)
 		if err != nil {
-			logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Error unmarshalling response: %v\n", err))
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
@@ -827,7 +842,7 @@ func (r *Ranker) callOllama(prompt string, runNumber int, batchNumber int, total
 
 		missingIDs, err := validateIDs(&rankedResponse, inputIDs)
 		if err != nil {
-			logFromApiCall(runNumber, r.cfg.NumRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
