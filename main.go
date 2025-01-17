@@ -62,6 +62,8 @@ type FinalResult struct {
 	Rank     int     `json:"rank"`
 }
 
+var dryRun bool
+
 func GenerateSchema[T any]() interface{} {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: false,
@@ -96,6 +98,7 @@ func main() {
 	numRuns := flag.Int("r", 10, "Number of runs")
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
+	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
 	flag.Parse()
 
 	if *inputFile == "" {
@@ -189,7 +192,9 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Println(string(jsonResults))
+	if !dryRun {
+		fmt.Println(string(jsonResults))
+	}
 }
 
 func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, depth int, ollamaModel *string) []FinalResult {
@@ -404,6 +409,19 @@ func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, to
 	prompt := initialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+	}
+
+	if dryRun {
+		log.Printf("Dry run API call")
+		// Simulate a ranked response for dry run
+		var rankedObjects []RankedObject
+		for i, obj := range group {
+			rankedObjects = append(rankedObjects, RankedObject{
+				Object: obj,
+				Score:  float64(i + 1), // Simulate scores based on position
+			})
+		}
+		return rankedObjects
 	}
 
 	var rankedResponse RankedObjectResponse
