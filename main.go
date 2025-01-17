@@ -372,7 +372,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	return finalResults
 }
 
-// TODO: Also log the "round" number (i.e., the repeated recursion depth).
+// TODO: Also log the request/retry attempt number.
 func (r *Ranker) logFromApiCall(runNum, batchNum int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Round %d, Run %*d/%d, Batch %*d/%d: "+message, r.round, len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches)
 	log.Printf(formattedMessage, args...)
