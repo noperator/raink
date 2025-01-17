@@ -235,31 +235,26 @@ func main() {
 		objects = append(objects, Object{ID: id, Value: line})
 	}
 
-	encoding, err := tiktoken.GetEncoding(ranker.cfg.Encoding)
-	if err != nil {
-		log.Fatal("Failed to get tiktoken encoding:", err)
-	}
-
 	// Dynamically adjust batch size upfront.
 	// TODO: Move this to a separate function.
-	currentBatchSize := ranker.cfg.BatchSize
+	samples := 10
 	for {
 		valid := true
-		var totalTokens int
-		var totalBatches int
+		var estTotalTokens int
+		var numBatches int
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < samples; i++ {
 			ranker.rng.Shuffle(len(objects), func(i, j int) {
 				objects[i], objects[j] = objects[j], objects[i]
 			})
-			totalBatches = len(objects) / currentBatchSize
-			for j := 0; j < totalBatches; j++ {
-				group := objects[j*currentBatchSize : (j+1)*currentBatchSize]
-				est := estimateTokens(group, *initialPrompt, encoding)
-				totalTokens += est
-				if est > ranker.cfg.TokenLimit {
-					log.Printf("shuffle %d: Estimated tokens %d > max token threshold %d", i, est, ranker.cfg.TokenLimit)
-					logTokenSizes(group, *initialPrompt, encoding)
+			numBatches = len(objects) / ranker.cfg.BatchSize
+			for j := 0; j < numBatches; j++ {
+				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
+				estBatchTokens := ranker.estimateTokens(batch)
+				estTotalTokens += estBatchTokens
+				if estBatchTokens > ranker.cfg.TokenLimit {
+					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
+					ranker.logTokenSizes(batch)
 					valid = false
 					break
 				}
@@ -269,19 +264,18 @@ func main() {
 			}
 		}
 
-		if totalBatches > 0 {
-			averageTokens := totalTokens / totalBatches
-			averagePercentage := float64(averageTokens) / float64(ranker.cfg.BatchTokens) * 100
-			log.Printf("Average estimated tokens: %d (%.2f%% of max tokens)", averageTokens, averagePercentage)
+		if numBatches > 0 {
+			avgEstTokens := estTotalTokens / (samples * numBatches)
+			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
+			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
 		}
 
 		if valid {
-			ranker.cfg.BatchSize = currentBatchSize
 			break
 		}
-		currentBatchSize--
-		log.Printf("Decreasing batch size to %d", currentBatchSize)
-		if currentBatchSize == 0 {
+		ranker.cfg.BatchSize--
+		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
+		if ranker.cfg.BatchSize == 0 {
 			log.Fatal("Cannot create a valid batch within the token limit")
 		}
 	}
@@ -488,10 +482,10 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 	return results
 }
 
-func logTokenSizes(group []Object, initialPrompt string, encoding *tiktoken.Tiktoken) {
+func (r *Ranker) logTokenSizes(group []Object) {
 	log.Println("Logging token sizes for each object in the batch:")
 	for _, obj := range group {
-		tokenSize := estimateTokens([]Object{obj}, initialPrompt, encoding)
+		tokenSize := r.estimateTokens([]Object{obj})
 		valuePreview := obj.Value
 		if len(valuePreview) > 100 {
 			valuePreview = valuePreview[:100]
@@ -527,12 +521,19 @@ const missingIDsStr = "Your last response was missing the following IDs: [%s]. "
 
 const invalidJSONStr = "Your last response was not valid JSON. Try again!"
 
-func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tiktoken) int {
-	prompt := initialPrompt + promptDisclaimer
+func (r *Ranker) estimateTokens(group []Object) int {
+	prompt := r.cfg.InitialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
-	return len(encoding.Encode(prompt, nil, nil))
+
+	if r.cfg.OllamaModel != "" {
+		// TODO: Update to use Ollama tokenize API when this PR is merged:
+		// https://github.com/ollama/ollama/pull/6586
+		return len(prompt) / 4
+	} else {
+		return len(r.encoding.Encode(prompt, nil, nil))
+	}
 }
 
 func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []RankedObject {
