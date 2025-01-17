@@ -85,7 +85,7 @@ func ShortDeterministicID(input string, length int) string {
 
 	// Step 3: Truncate to the desired length
 	if length > len(base64Encoded) {
-		length = len(base64Encoded) // Avoid out-of-bounds access
+		length = len(base64Encoded)
 	}
 	return base64Encoded[:length]
 }
@@ -99,11 +99,20 @@ func main() {
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
+	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
 
+	// TODO: Use a proper package for CLI flags that doesn't require building a
+	// custom help message.
+
 	if *inputFile == "" {
-		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [--ollama-model <model_name>]")
+		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [--ollama-model <model_name>] [-ratio <refinement_ratio>]")
 		return
+	}
+
+	if *refinementRatio < 0 || *refinementRatio >= 1 {
+		fmt.Println("Error: Refinement ratio must be >= 0 and < 1")
+		os.Exit(1)
 	}
 
 	file, err := os.Open(*inputFile)
@@ -180,7 +189,7 @@ func main() {
 	}
 
 	// Recursive processing
-	finalResults := recursiveProcess(objects, currentBatchSize, *numRuns, *initialPrompt, rng, 1, ollamaModel)
+	finalResults := refine(objects, currentBatchSize, *numRuns, *initialPrompt, rng, 1, ollamaModel, *refinementRatio)
 
 	// Add the rank key to each final result based on its position in the list
 	for i := range finalResults {
@@ -197,61 +206,81 @@ func main() {
 	}
 }
 
-func recursiveProcess(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, depth int, ollamaModel *string) []FinalResult {
-	// If we have only one object, return it with the highest score
+// TODO: The final exposure value should be the sum of all exposures from all
+// refinement rounds (not just the last one). This isn't crucial since exposure
+// is just a helpful metric to show that objects compared to a sufficiently
+// large number of other objects.
+
+func refine(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, round int, ollamaModel *string, refinementRatio float64) []FinalResult {
+	// If we've narrowed down to a single object, we're done.
 	if len(objects) == 1 {
 		return []FinalResult{
 			{
 				Key:      objects[0].ID,
 				Value:    objects[0].Value,
-				Score:    0, // Set score to 0 to guarantee it's the "highest" score
-				Exposure: 1, // Since it's the only one, it has been exposed once
+				Score:    0, // 0 is guaranteed to be the "highest" score.
+				Exposure: 1,
 			},
 		}
 	}
 
+	// Downstream ranking gets unhappy if we try to rank more objects than we
+	// have.
 	if batchSize > len(objects) {
 		batchSize = len(objects)
 	}
 
-	// Process the objects and get the sorted results
-	results := processObjects(objects, batchSize, numRuns, initialPrompt, rng, ollamaModel)
+	// Process the objects and get the sorted results.
+	results := shuffleBatchRank(objects, batchSize, numRuns, initialPrompt, rng, ollamaModel)
 
-	// TODO: Move this ratio (50%) to a CLI arg.
-	mid := len(results) / 2
-	topHalf := results[:mid]
-	bottomHalf := results[mid:]
+	// If the refinement ratio is 0, that effectively means we're refining
+	// _none_ of the top objects, so we're done.
+	if refinementRatio == 0 {
+		return results
+	}
+
+	// Calculate the mid index based on the refinement ratio.
+	mid := int(float64(len(results)) * refinementRatio)
+	topPortion := results[:mid]
+	bottomPortion := results[mid:]
+
+	// If we haven't reduced the number of objects (as may eventually happen
+	// for a ratio above 0.5), we're done.
+	if len(topPortion) == len(objects) {
+		return results
+	}
 
 	log.Println("Top items being sent back into recursion:")
-	for i, obj := range topHalf {
+	for i, obj := range topPortion {
 		log.Printf("Rank %d: ID=%s, Score=%.2f, Value=%s", i+1, obj.Key, obj.Score, obj.Value)
 	}
 
-	var topHalfObjects []Object
-	for _, result := range topHalf {
-		topHalfObjects = append(topHalfObjects, Object{ID: result.Key, Value: result.Value})
+	var topPortionObjects []Object
+	for _, result := range topPortion {
+		topPortionObjects = append(topPortionObjects, Object{ID: result.Key, Value: result.Value})
 	}
 
-	refinedTopHalf := recursiveProcess(topHalfObjects, batchSize, numRuns, initialPrompt, rng, depth+1, ollamaModel)
+	refinedTopPortion := refine(topPortionObjects, batchSize, numRuns, initialPrompt, rng, round+1, ollamaModel, refinementRatio)
 
-	// Adjust scores by recursion depth
-	for i := range refinedTopHalf {
-		refinedTopHalf[i].Score /= float64(2 * depth)
+	// Adjust scores by recursion depth; this serves as an inverted weight so
+	// that later rounds are guaranteed to sit higher in the final list.
+	for i := range refinedTopPortion {
+		refinedTopPortion[i].Score /= float64(2 * round)
 	}
 
-	// Combine the refined top half with the unrefined bottom half
-	finalResults := append(refinedTopHalf, bottomHalf...)
+	// Combine the refined top portion with the unrefined bottom portion.
+	finalResults := append(refinedTopPortion, bottomPortion...)
 
 	return finalResults
 }
 
 // TODO: Also log the "round" number (i.e., the repeated recursion depth).
-func logRunBatch(runNumber, totalRuns, batchNumber, totalBatches int, message string, args ...interface{}) {
+func logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: "+message, len(strconv.Itoa(totalRuns)), runNumber, totalRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
 	log.Printf(formattedMessage, args...)
 }
 
-func processObjects(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, ollamaModel *string) []FinalResult {
+func shuffleBatchRank(objects []Object, batchSize, numRuns int, initialPrompt string, rng *rand.Rand, ollamaModel *string) []FinalResult {
 	scores := make(map[string][]float64)
 
 	totalBatches := len(objects) / batchSize
@@ -267,7 +296,8 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 			objects[i], objects[j] = objects[j], objects[i]
 		})
 
-		// Ensure remainder items from the first run are not in the remainder range in the second run
+		// Ensure remainder items from the first run are not in the remainder
+		// range in the second run
 		if i == 1 && len(firstRunRemainderItems) > 0 {
 			for {
 				remainderStart := totalBatches * batchSize
@@ -301,7 +331,7 @@ func processObjects(objects []Object, batchSize, numRuns int, initialPrompt stri
 			go func(runNumber, batchNumber int, group []Object) {
 				// formattedMessage := fmt.Sprintf("Run %*d/%d, Batch %*d/%d: Submitting batch to API\n", len(strconv.Itoa(numRuns)), runNumber, numRuns, len(strconv.Itoa(totalBatches)), batchNumber, totalBatches)
 				// log.Printf(formattedMessage)
-				rankedGroup := rankGroup(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt, ollamaModel)
+				rankedGroup := rankObjects(group, runNumber, numRuns, batchNumber, totalBatches, initialPrompt, ollamaModel)
 				resultsChan <- rankedGroup
 			}(i+1, j+1, group)
 		}
@@ -405,7 +435,7 @@ func estimateTokens(group []Object, initialPrompt string, encoding *tiktoken.Tik
 	return len(encoding.Encode(prompt, nil, nil))
 }
 
-func rankGroup(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string, ollamaModel *string) []RankedObject {
+func rankObjects(group []Object, runNumber int, totalRuns int, batchNumber int, totalBatches int, initialPrompt string, ollamaModel *string) []RankedObject {
 	prompt := initialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
@@ -478,7 +508,8 @@ func (t *CustomTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// Updates the rankedResponse in place to fix case-insensitive ID mismatches. If any IDs are missing, returns the missing IDs along with an error.
+// Updates the rankedResponse in place to fix case-insensitive ID mismatches.
+// If any IDs are missing, returns the missing IDs along with an error.
 func validateIDs(rankedResponse *RankedObjectResponse, inputIDs map[string]bool) ([]string, error) {
 	// Create a map for case-insensitive ID matching
 	inputIDsLower := make(map[string]string)
@@ -563,7 +594,7 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 
 			err = json.Unmarshal([]byte(completion.Choices[0].Message.Content), &rankedResponse)
 			if err != nil {
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+				logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(invalidJSONStr),
 				)
@@ -574,7 +605,7 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 
 			missingIDs, err := validateIDs(&rankedResponse, inputIDs)
 			if err != nil {
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+				logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "))),
 				)
@@ -587,7 +618,7 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 		}
 
 		if err == context.DeadlineExceeded {
-			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Context deadline exceeded, retrying...")
+			logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, "Context deadline exceeded, retrying...")
 			time.Sleep(backoff)
 			backoff *= 2
 			continue
@@ -615,13 +646,13 @@ func callOpenAI(prompt string, runNumber int, totalRuns int, batchNumber int, to
 			remainingTokens, _ := strconv.Atoi(remainingTokensStr)
 			resetDuration, _ := time.ParseDuration(strings.Replace(resetTokensStr, "s", "s", 1))
 
-			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Rate limit exceeded. Suggested wait time: %v. Remaining tokens: %d", resetDuration, remainingTokens)
+			logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, "Rate limit exceeded. Suggested wait time: %v. Remaining tokens: %d", resetDuration, remainingTokens)
 
 			if resetDuration > 0 {
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", resetDuration)
+				logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", resetDuration)
 				time.Sleep(resetDuration)
 			} else {
-				logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", backoff)
+				logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, "Waiting for %v before retrying...", backoff)
 				time.Sleep(backoff)
 				backoff *= 2
 			}
@@ -701,7 +732,7 @@ func callOllama(prompt string, model string, runNumber int, totalRuns int, batch
 
 		err = json.Unmarshal([]byte(ollamaResponse.Message.Content), &rankedResponse)
 		if err != nil {
-			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+			logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Error unmarshalling response: %v\n", err))
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
@@ -715,7 +746,7 @@ func callOllama(prompt string, model string, runNumber int, totalRuns int, batch
 
 		missingIDs, err := validateIDs(&rankedResponse, inputIDs)
 		if err != nil {
-			logRunBatch(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+			logFromApiCall(runNumber, totalRuns, batchNumber, totalBatches, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
