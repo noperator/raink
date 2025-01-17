@@ -42,12 +42,12 @@ type Config struct {
 	NumRuns         int
 	OllamaModel     string
 	OpenAIModel     openai.ChatModel
-	MaxTokens       int
 	TokenLimit      int
 	RefinementRatio float64
 	OpenAIKey       string
 	OllamaAPIURL    string
 	Encoding        string
+	BatchTokens     int
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -60,9 +60,6 @@ func (c *Config) Validate() error {
 	}
 	if c.NumRuns <= 0 {
 		return fmt.Errorf("number of runs must be greater than 0")
-	}
-	if c.MaxTokens <= 0 {
-		return fmt.Errorf("max tokens must be greater than 0")
 	}
 	if c.TokenLimit <= 0 {
 		return fmt.Errorf("token limit must be greater than 0")
@@ -153,19 +150,29 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	inputFile := flag.String("f", "", "Input file")
-	batchSize := flag.Int("s", 10, "Batch size")
+	batchSize := flag.Int("s", 10, "Number of items per batch")
 	numRuns := flag.Int("r", 10, "Number of runs")
+	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
 
-	// TODO: Use a proper package for CLI flags that doesn't require building a
-	// custom help message.
+	// TODO: This should be a more resilient check. We're assuming that if the
+	// batchTokens is 128000, then a user didn't pass that value via CLI (i.e.,
+	// that it's the default value).
+	if *ollamaModel != "" && *batchTokens == 128000 {
+		*batchTokens = 4096
+	}
+
+	// This "threshold" is a way to add some padding to our estimation of
+	// average token usage per batch. We're effectively leaving 5% of
+	// wiggle room.
+	var tokenLimitThreshold = int(0.95 * float64(*batchTokens))
 
 	if *inputFile == "" {
-		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [--ollama-model <model_name>] [-ratio <refinement_ratio>]")
+		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-ratio <refinement_ratio>]")
 		return
 	}
 
@@ -186,13 +193,6 @@ func main() {
 	// const model = openai.ChatModelGPT4o2024_08_06
 	const model = openai.ChatModelGPT4oMini
 
-	// TODO: Make this configurable.
-	// https://platform.openai.com/docs/models/gp#models-overview
-	const maxTokens = 128000
-	const tokenLimitThreshold = 0.95 * maxTokens
-
-	// TODO: Make this configurable.
-	// https://github.com/pkoukk/tiktoken-go?tab=readme-ov-file#available-models
 	const enc = "o200k_base"
 
 	config := &Config{
@@ -200,13 +200,13 @@ func main() {
 		BatchSize:       *batchSize,
 		NumRuns:         *numRuns,
 		OllamaModel:     *ollamaModel,
-		MaxTokens:       maxTokens,
 		TokenLimit:      tokenLimitThreshold,
 		RefinementRatio: *refinementRatio,
 		OpenAIKey:       apiKey,
 		OllamaAPIURL:    apiURL,
 		OpenAIModel:     model,
 		Encoding:        enc,
+		BatchTokens:     *batchTokens,
 	}
 
 	ranker, err := NewRanker(config)
@@ -258,7 +258,7 @@ func main() {
 				est := estimateTokens(group, *initialPrompt, encoding)
 				totalTokens += est
 				if est > ranker.cfg.TokenLimit {
-					log.Printf("shuffle %d: Estimated tokens %d > max token threshold %f", i, est, tokenLimitThreshold)
+					log.Printf("shuffle %d: Estimated tokens %d > max token threshold %d", i, est, ranker.cfg.TokenLimit)
 					logTokenSizes(group, *initialPrompt, encoding)
 					valid = false
 					break
@@ -271,7 +271,7 @@ func main() {
 
 		if totalBatches > 0 {
 			averageTokens := totalTokens / totalBatches
-			averagePercentage := float64(averageTokens) / maxTokens * 100
+			averagePercentage := float64(averageTokens) / float64(ranker.cfg.BatchTokens) * 100
 			log.Printf("Average estimated tokens: %d (%.2f%% of max tokens)", averageTokens, averagePercentage)
 		}
 
@@ -777,6 +777,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 			"model":    r.cfg.OllamaModel,
 			"stream":   false,
 			"format":   "json",
+			"num_ctx":  r.cfg.BatchTokens,
 			"messages": conversationHistory,
 		})
 		if err != nil {
