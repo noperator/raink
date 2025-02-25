@@ -155,6 +155,7 @@ func main() {
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
 	initialPrompt := flag.String("p", "", "Initial prompt")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
+	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
 	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
@@ -188,11 +189,6 @@ func main() {
 		apiURL = "http://localhost:11434/api/chat"
 	}
 
-	// TODO: Make this configurable.
-	// https://pkg.go.dev/github.com/openai/openai-go@v0.1.0-alpha.38#ChatModel
-	// const model = openai.ChatModelGPT4o2024_08_06
-	const model = openai.ChatModelGPT4oMini
-
 	const enc = "o200k_base"
 
 	config := &Config{
@@ -200,11 +196,11 @@ func main() {
 		BatchSize:       *batchSize,
 		NumRuns:         *numRuns,
 		OllamaModel:     *ollamaModel,
+		OpenAIModel:     *oaiModel,
 		TokenLimit:      tokenLimitThreshold,
 		RefinementRatio: *refinementRatio,
 		OpenAIKey:       apiKey,
 		OllamaAPIURL:    apiURL,
-		OpenAIModel:     model,
 		Encoding:        enc,
 		BatchTokens:     *batchTokens,
 	}
