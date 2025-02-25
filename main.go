@@ -95,6 +95,51 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}, nil
 }
 
+func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) bool {
+	// Dynamically adjust batch size upfront.
+	for {
+		valid := true
+		var estTotalTokens int
+		var numBatches int
+
+		for i := 0; i < samples; i++ {
+			ranker.rng.Shuffle(len(objects), func(i, j int) {
+				objects[i], objects[j] = objects[j], objects[i]
+			})
+			numBatches = len(objects) / ranker.cfg.BatchSize
+			for j := 0; j < numBatches; j++ {
+				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
+				estBatchTokens := ranker.estimateTokens(batch)
+				estTotalTokens += estBatchTokens
+				if estBatchTokens > ranker.cfg.TokenLimit {
+					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
+					ranker.logTokenSizes(batch)
+					valid = false
+					break
+				}
+			}
+			if !valid {
+				return false
+			}
+		}
+
+		if numBatches > 0 {
+			avgEstTokens := estTotalTokens / (samples * numBatches)
+			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
+			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
+		}
+
+		if valid {
+			return true
+		}
+		ranker.cfg.BatchSize--
+		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
+		if ranker.cfg.BatchSize == 0 {
+			log.Fatal("Cannot create a valid batch within the token limit")
+		}
+	}
+}
+
 type Object struct {
 	ID    string `json:"id"`
 	Value string `json:"value"`
@@ -227,49 +272,7 @@ func main() {
 	}
 
 	// Dynamically adjust batch size upfront.
-	// TODO: Move this to a separate function.
-	samples := 10
-	for {
-		valid := true
-		var estTotalTokens int
-		var numBatches int
-
-		for i := 0; i < samples; i++ {
-			ranker.rng.Shuffle(len(objects), func(i, j int) {
-				objects[i], objects[j] = objects[j], objects[i]
-			})
-			numBatches = len(objects) / ranker.cfg.BatchSize
-			for j := 0; j < numBatches; j++ {
-				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
-				estBatchTokens := ranker.estimateTokens(batch)
-				estTotalTokens += estBatchTokens
-				if estBatchTokens > ranker.cfg.TokenLimit {
-					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
-					ranker.logTokenSizes(batch)
-					valid = false
-					break
-				}
-			}
-			if !valid {
-				break
-			}
-		}
-
-		if numBatches > 0 {
-			avgEstTokens := estTotalTokens / (samples * numBatches)
-			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
-			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
-		}
-
-		if valid {
-			break
-		}
-		ranker.cfg.BatchSize--
-		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
-		if ranker.cfg.BatchSize == 0 {
-			log.Fatal("Cannot create a valid batch within the token limit")
-		}
-	}
+	ranker.AdjustBatchSize(objects, 10)
 
 	// Recursive processing
 	finalResults := ranker.Rank(objects, 1)
