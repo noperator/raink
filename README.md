@@ -22,7 +22,7 @@ We built raink to circumvent those issues and solve general ranking problems tha
 ### Install
 
 ```
-git clone https://github.com/bishopfox/raink
+git clone https://github.com/noperator/raink
 cd raink
 go install
 ```
@@ -46,7 +46,7 @@ Usage of raink:
     	Batch size (default 10)
 ```
 
-Compares 100 [sentences](https://github.com/BishopFox/raink/blob/main/testdata/sentences.txt) in under 2 min.
+Compares 100 [sentences](https://github.com/noperator/raink/blob/main/testdata/sentences.txt) in under 2 min.
 
 ```
 raink \
