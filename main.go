@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -189,11 +190,61 @@ func ShortDeterministicID(input string, length int) string {
 	return base64Encoded[:length]
 }
 
+func loadObjectsFromFile(filePath string, templateData string) ([]Object, error) {
+	var tmpl *template.Template
+	if templateData != "" {
+		if templateData[0] == '@' {
+			content, err := os.ReadFile(templateData[1:])
+			if err != nil {
+				return nil, err
+			}
+			templateData = string(content)
+		}
+		var err error
+		if tmpl, err = template.New("raink-item-template").Parse(templateData); err != nil {
+			return nil, err
+		}
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var objects []Object
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		line = strings.TrimSpace(line)
+
+		if tmpl != nil {
+			var tmplData bytes.Buffer
+			if err := tmpl.Execute(&tmplData, map[string]string{"Data": line}); err != nil {
+				return nil, err
+			}
+			line = tmplData.String()
+		}
+
+		id := ShortDeterministicID(line, idLen)
+		objects = append(objects, Object{ID: id, Value: line})
+	}
+
+	return objects, nil
+}
+
 // TODO: Move all of this CLI-related code to a separate package.
 func main() {
 	log.SetOutput(os.Stderr)
 
 	inputFile := flag.String("f", "", "Input file")
+	inputTemplate := flag.String("template", "{{.Data}}", "Template for each object in the input file (prefix with @ to use a file)")
 	batchSize := flag.Int("s", 10, "Number of items per batch")
 	numRuns := flag.Int("r", 10, "Number of runs")
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
@@ -261,25 +312,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	file, err := os.Open(*inputFile)
+	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate)
 	if err != nil {
 		log.Fatal(err)
-	}
-	defer file.Close()
-
-	var objects []Object
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Fatal(err)
-		}
-		line = strings.TrimSpace(line)
-		id := ShortDeterministicID(line, idLen)
-		objects = append(objects, Object{ID: id, Value: line})
 	}
 
 	// Dynamically adjust batch size upfront.
