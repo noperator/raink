@@ -197,7 +197,8 @@ func main() {
 	batchSize := flag.Int("s", 10, "Number of items per batch")
 	numRuns := flag.Int("r", 10, "Number of runs")
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
-	initialPrompt := flag.String("p", "", "Initial prompt")
+	initialPrompt := flag.String("p", "", "Initial prompt (prefix with @ to use a file)")
+	outputFile := flag.String("o", "", "JSON output file")
 
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434/api/chat", "Ollama API URL")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
@@ -230,8 +231,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	userPrompt := *initialPrompt
+	if strings.HasPrefix(userPrompt, "@") {
+		filePath := strings.TrimPrefix(userPrompt, "@")
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Fatalf("Error reading initial prompt file: %v", err)
+		}
+		userPrompt = string(content)
+	}
+
 	config := &Config{
-		InitialPrompt:   *initialPrompt,
+		InitialPrompt:   userPrompt,
 		BatchSize:       *batchSize,
 		NumRuns:         *numRuns,
 		OllamaModel:     *ollamaModel,
@@ -289,6 +300,11 @@ func main() {
 
 	if !config.DryRun {
 		fmt.Println(string(jsonResults))
+	}
+
+	if *outputFile != "" {
+		os.WriteFile(*outputFile, jsonResults, 0644)
+		log.Printf("Results written to %s\n", *outputFile)
 	}
 }
 
