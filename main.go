@@ -48,6 +48,7 @@ type Config struct {
 	OllamaAPIURL    string
 	Encoding        string
 	BatchTokens     int
+	DryRun          bool
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -162,8 +163,6 @@ type FinalResult struct {
 	Rank     int     `json:"rank"`
 }
 
-var dryRun bool
-
 func GenerateSchema[T any]() interface{} {
 	reflector := jsonschema.Reflector{
 		AllowAdditionalProperties: false,
@@ -205,7 +204,7 @@ func main() {
 	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
 	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
 
-	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
+	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
 
@@ -243,6 +242,7 @@ func main() {
 		OllamaAPIURL:    *ollamaURL,
 		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
+		DryRun:          *dryRun,
 	}
 
 	ranker, err := NewRanker(config)
@@ -287,7 +287,7 @@ func main() {
 		panic(err)
 	}
 
-	if !dryRun {
+	if !config.DryRun {
 		fmt.Println(string(jsonResults))
 	}
 }
@@ -536,7 +536,7 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
 
-	if dryRun {
+	if r.cfg.DryRun {
 		log.Printf("Dry run API call")
 		// Simulate a ranked response for dry run
 		var rankedObjects []RankedObject
