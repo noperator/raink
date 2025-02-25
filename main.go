@@ -143,8 +143,12 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 }
 
 type Object struct {
-	ID    string `json:"id"`
+	// object unique identifier use to identify the object in the final results
+	ID string `json:"id"`
+	// string value to be ranked
 	Value string `json:"value"`
+	// the original structured object if we're loading a json file
+	Object interface{} `json:"object"`
 }
 
 type RankedObject struct {
@@ -157,11 +161,13 @@ type RankedObjectResponse struct {
 }
 
 type FinalResult struct {
-	Key      string  `json:"key"`
-	Value    string  `json:"value"`
-	Score    float64 `json:"score"`
-	Exposure int     `json:"exposure"`
-	Rank     int     `json:"rank"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	// the original structured object if we're loading a json file
+	Object   interface{} `json:"object"`
+	Score    float64     `json:"score"`
+	Exposure int         `json:"exposure"`
+	Rank     int         `json:"rank"`
 }
 
 func GenerateSchema[T any]() interface{} {
@@ -238,7 +244,7 @@ func loadObjectsFromFile(filePath string, templateData string) (objects []Object
 			}
 
 			id := ShortDeterministicID(valueStr, idLen)
-			objects = append(objects, Object{ID: id, Value: valueStr})
+			objects = append(objects, Object{ID: id, Object: value, Value: valueStr})
 		}
 	} else {
 		// read and interpolate the file line by line
@@ -262,7 +268,7 @@ func loadObjectsFromFile(filePath string, templateData string) (objects []Object
 			}
 
 			id := ShortDeterministicID(line, idLen)
-			objects = append(objects, Object{ID: id, Value: line})
+			objects = append(objects, Object{ID: id, Object: nil, Value: line})
 		}
 	}
 
@@ -397,6 +403,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 			{
 				Key:      objects[0].ID,
 				Value:    objects[0].Value,
+				Object:   objects[0].Object,
 				Score:    0, // 0 is guaranteed to be the "highest" score.
 				Exposure: 1,
 			},
@@ -438,7 +445,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 
 	var topPortionObjects []Object
 	for _, result := range topPortion {
-		topPortionObjects = append(topPortionObjects, Object{ID: result.Key, Value: result.Value})
+		topPortionObjects = append(topPortionObjects, Object{ID: result.Key, Value: result.Value, Object: result.Object})
 	}
 
 	refinedTopPortion := r.Rank(topPortionObjects, round+1)
@@ -550,6 +557,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 				results = append(results, FinalResult{
 					Key:      id,
 					Value:    obj.Value,
+					Object:   obj.Object,
 					Score:    score,
 					Exposure: exposureCounts[id], // Include exposure count
 				})
