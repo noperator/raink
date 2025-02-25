@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -97,7 +98,7 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}, nil
 }
 
-func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) bool {
+func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 	// Dynamically adjust batch size upfront.
 	for {
 		valid := true
@@ -116,12 +117,11 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) bool {
 				if estBatchTokens > ranker.cfg.TokenLimit {
 					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
 					ranker.logTokenSizes(batch)
-					valid = false
 					break
 				}
 			}
 			if !valid {
-				return false
+				break
 			}
 		}
 
@@ -132,7 +132,7 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) bool {
 		}
 
 		if valid {
-			return true
+			break
 		}
 		ranker.cfg.BatchSize--
 		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
@@ -190,7 +190,7 @@ func ShortDeterministicID(input string, length int) string {
 	return base64Encoded[:length]
 }
 
-func loadObjectsFromFile(filePath string, templateData string) ([]Object, error) {
+func loadObjectsFromFile(filePath string, templateData string) (objects []Object, err error) {
 	var tmpl *template.Template
 	if templateData != "" {
 		if templateData[0] == '@' {
@@ -200,7 +200,6 @@ func loadObjectsFromFile(filePath string, templateData string) ([]Object, error)
 			}
 			templateData = string(content)
 		}
-		var err error
 		if tmpl, err = template.New("raink-item-template").Parse(templateData); err != nil {
 			return nil, err
 		}
@@ -212,28 +211,59 @@ func loadObjectsFromFile(filePath string, templateData string) ([]Object, error)
 	}
 	defer file.Close()
 
-	var objects []Object
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".json" {
+		// parse the file in an opaque array
+		var data []interface{}
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
 			return nil, err
 		}
-		line = strings.TrimSpace(line)
 
-		if tmpl != nil {
-			var tmplData bytes.Buffer
-			if err := tmpl.Execute(&tmplData, map[string]string{"Data": line}); err != nil {
+		// iterate over the map and create objects
+		for _, value := range data {
+			var valueStr string
+			if tmpl != nil {
+				var tmplData bytes.Buffer
+				if err := tmpl.Execute(&tmplData, value); err != nil {
+					return nil, err
+				}
+				valueStr = tmplData.String()
+			} else {
+				log.Printf("WARNING: using json input without a template, using JSON object as it is\n")
+				jsonValue, err := json.Marshal(value)
+				if err != nil {
+					return nil, err
+				}
+				valueStr = string(jsonValue)
+			}
+
+			id := ShortDeterministicID(valueStr, idLen)
+			objects = append(objects, Object{ID: id, Value: valueStr})
+		}
+	} else {
+		// read and interpolate the file line by line
+		reader := bufio.NewReader(file)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
 				return nil, err
 			}
-			line = tmplData.String()
-		}
+			line = strings.TrimSpace(line)
 
-		id := ShortDeterministicID(line, idLen)
-		objects = append(objects, Object{ID: id, Value: line})
+			if tmpl != nil {
+				var tmplData bytes.Buffer
+				if err := tmpl.Execute(&tmplData, map[string]string{"Data": line}); err != nil {
+					return nil, err
+				}
+				line = tmplData.String()
+			}
+
+			id := ShortDeterministicID(line, idLen)
+			objects = append(objects, Object{ID: id, Value: line})
+		}
 	}
 
 	return objects, nil
@@ -315,6 +345,14 @@ func main() {
 	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// check that no object is too large
+	for _, obj := range objects {
+		tokens := ranker.estimateTokens([]Object{obj})
+		if tokens > *batchTokens {
+			log.Fatalf("Object is too large with %d tokens:\n%s", tokens, obj.Value)
+		}
 	}
 
 	// Dynamically adjust batch size upfront.
