@@ -36,14 +36,33 @@ Set your `OPENAI_API_KEY` environment variable.
 ```
 raink  -h
 Usage of raink:
+  -dry-run
+    	Enable dry run mode (log API calls without making them)
+  -encoding string
+    	Tokenizer encoding (default "o200k_base")
   -f string
     	Input file
+  -o string
+    	JSON output file
+  -ollama-model string
+    	Ollama model name (if not set, OpenAI will be used)
+  -ollama-url string
+    	Ollama API URL (default "http://localhost:11434/api/chat")
+  -openai-model string
+    	OpenAI model name (default "gpt-4o-mini")
   -p string
-    	Initial prompt
+    	Initial prompt (prefix with @ to use a file)
   -r int
     	Number of runs (default 10)
+  -ratio float
+    	Refinement ratio as a decimal (e.g., 0.5 for 50%) (default 0.5)
   -s int
-    	Batch size (default 10)
+    	Number of items per batch (default 10)
+  -t int
+    	Max tokens per batch (default 128000)
+  -template string
+    	Template for each object in the input file (prefix with @ to use a file) (default "{{.Data}}")
+
 ```
 
 Compares 100 [sentences](https://github.com/noperator/raink/blob/main/testdata/sentences.txt) in under 2 min.
@@ -67,6 +86,43 @@ raink \
    8  The stars twinkled brightly in the clear night sky.
    9  He spotted a shooting star while stargazing.
   10  She opened the curtains to let in the morning light.
+```
+
+#### JSON Support
+
+If the input file is a JSON document, it will be read as an array of objects and each object will be used for ranking.
+
+For instance, two objects would be loaded and ranked from this document:
+
+```json
+[
+  {
+    "path": "/foo",
+    "code": "bar",
+  },
+  {
+    "path": "/baz",
+    "code": "nope",
+  }
+]
+```
+
+#### Templates
+
+It is possible to include each element from the input file in a template using the [golang template syntax](https://pkg.go.dev/text/template) via the `-template "template string"` (or `-template @file.tpl`) argument.
+
+For text input files, each line can be referenced in the template with the `Data` variable:
+
+```
+Anything you want with {{ .Data }}
+```
+
+For JSON input files, each object in the array can be referenced directly. For instance, elements of the previous JSON example can be referenced in the template code like so:
+
+```
+# {{ .path }}
+
+{{ .code }}
 ```
 
 ## Back matter
