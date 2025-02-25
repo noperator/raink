@@ -154,8 +154,12 @@ func main() {
 	numRuns := flag.Int("r", 10, "Number of runs")
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
 	initialPrompt := flag.String("p", "", "Initial prompt")
+
+	ollamaURL := flag.String("ollama-url", "http://localhost:11434/api/chat", "Ollama API URL")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
+	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
+
 	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
@@ -182,15 +186,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-
-	apiURL := os.Getenv("OLLAMA_API_URL")
-	if apiURL == "" {
-		apiURL = "http://localhost:11434/api/chat"
-	}
-
-	const enc = "o200k_base"
-
 	config := &Config{
 		InitialPrompt:   *initialPrompt,
 		BatchSize:       *batchSize,
@@ -199,9 +194,9 @@ func main() {
 		OpenAIModel:     *oaiModel,
 		TokenLimit:      tokenLimitThreshold,
 		RefinementRatio: *refinementRatio,
-		OpenAIKey:       apiKey,
-		OllamaAPIURL:    apiURL,
-		Encoding:        enc,
+		OpenAIKey:       os.Getenv("OPENAI_API_KEY"),
+		OllamaAPIURL:    *ollamaURL,
+		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
 	}
 
