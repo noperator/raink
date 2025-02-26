@@ -129,6 +129,7 @@ For JSON input files, each object in the array can be referenced directly. For i
 
 ### See also
 
+- [Hard problems that reduce to document ranking](https://noperator.dev/posts/document-ranking-for-complex-problems/)
 - [raink: Use LLMs for Document Ranking](https://bishopfox.com/blog/raink-llms-document-ranking)
 - [Patch Perfect: Harmonizing with LLMs to Find Security Vulns](https://www.youtube.com/watch?v=IBuL1zY69tY)
 - [Large Language Models are Effective Text Rankers with Pairwise Ranking Prompting](https://arxiv.org/html/2306.17563v2)
@@ -145,10 +146,12 @@ For JSON input files, each object in the array can be referenced directly. For i
 - [ ] run openai batch mode
 - [x] automatically calculate optimal batch size?
 - [x] explore "tournament" sort vs complete exposure each time
-- [ ] add parameter for refinement ratio
+- [x] add parameter for refinement ratio
 - [ ] add blog link
-- [ ] support non-OpenAI models
+- [x] support non-OpenAI models
 - [ ] add boolean refinement flag
+- [ ] separate package and cli tool
+- [ ] add python bindings
 
 ### License
 
