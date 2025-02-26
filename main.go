@@ -14,9 +14,11 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/invopop/jsonschema"
@@ -48,6 +50,7 @@ type Config struct {
 	OllamaAPIURL    string
 	Encoding        string
 	BatchTokens     int
+	DryRun          bool
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -95,9 +98,57 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}, nil
 }
 
+func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
+	// Dynamically adjust batch size upfront.
+	for {
+		valid := true
+		var estTotalTokens int
+		var numBatches int
+
+		for i := 0; i < samples; i++ {
+			ranker.rng.Shuffle(len(objects), func(i, j int) {
+				objects[i], objects[j] = objects[j], objects[i]
+			})
+			numBatches = len(objects) / ranker.cfg.BatchSize
+			for j := 0; j < numBatches; j++ {
+				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
+				estBatchTokens := ranker.estimateTokens(batch)
+				estTotalTokens += estBatchTokens
+				if estBatchTokens > ranker.cfg.TokenLimit {
+					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
+					ranker.logTokenSizes(batch)
+					break
+				}
+			}
+			if !valid {
+				break
+			}
+		}
+
+		if numBatches > 0 {
+			avgEstTokens := estTotalTokens / (samples * numBatches)
+			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
+			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
+		}
+
+		if valid {
+			break
+		}
+		ranker.cfg.BatchSize--
+		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
+		if ranker.cfg.BatchSize == 0 {
+			log.Fatal("Cannot create a valid batch within the token limit")
+		}
+	}
+}
+
 type Object struct {
-	ID    string `json:"id"`
+	// object unique identifier use to identify the object in the final results
+	ID string `json:"id"`
+	// string value to be ranked
 	Value string `json:"value"`
+	// the original structured object if we're loading a json file
+	Object interface{} `json:"object"`
 }
 
 type RankedObject struct {
@@ -110,14 +161,14 @@ type RankedObjectResponse struct {
 }
 
 type FinalResult struct {
-	Key      string  `json:"key"`
-	Value    string  `json:"value"`
-	Score    float64 `json:"score"`
-	Exposure int     `json:"exposure"`
-	Rank     int     `json:"rank"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	// the original structured object if we're loading a json file
+	Object   interface{} `json:"object"`
+	Score    float64     `json:"score"`
+	Exposure int         `json:"exposure"`
+	Rank     int         `json:"rank"`
 }
-
-var dryRun bool
 
 func GenerateSchema[T any]() interface{} {
 	reflector := jsonschema.Reflector{
@@ -145,17 +196,103 @@ func ShortDeterministicID(input string, length int) string {
 	return base64Encoded[:length]
 }
 
+func loadObjectsFromFile(filePath string, templateData string) (objects []Object, err error) {
+	var tmpl *template.Template
+	if templateData != "" {
+		if templateData[0] == '@' {
+			content, err := os.ReadFile(templateData[1:])
+			if err != nil {
+				return nil, err
+			}
+			templateData = string(content)
+		}
+		if tmpl, err = template.New("raink-item-template").Parse(templateData); err != nil {
+			return nil, err
+		}
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".json" {
+		// parse the file in an opaque array
+		var data []interface{}
+		if err := json.NewDecoder(file).Decode(&data); err != nil {
+			return nil, err
+		}
+
+		// iterate over the map and create objects
+		for _, value := range data {
+			var valueStr string
+			if tmpl != nil {
+				var tmplData bytes.Buffer
+				if err := tmpl.Execute(&tmplData, value); err != nil {
+					return nil, err
+				}
+				valueStr = tmplData.String()
+			} else {
+				log.Printf("WARNING: using json input without a template, using JSON object as it is\n")
+				jsonValue, err := json.Marshal(value)
+				if err != nil {
+					return nil, err
+				}
+				valueStr = string(jsonValue)
+			}
+
+			id := ShortDeterministicID(valueStr, idLen)
+			objects = append(objects, Object{ID: id, Object: value, Value: valueStr})
+		}
+	} else {
+		// read and interpolate the file line by line
+		reader := bufio.NewReader(file)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				return nil, err
+			}
+			line = strings.TrimSpace(line)
+
+			if tmpl != nil {
+				var tmplData bytes.Buffer
+				if err := tmpl.Execute(&tmplData, map[string]string{"Data": line}); err != nil {
+					return nil, err
+				}
+				line = tmplData.String()
+			}
+
+			id := ShortDeterministicID(line, idLen)
+			objects = append(objects, Object{ID: id, Object: nil, Value: line})
+		}
+	}
+
+	return objects, nil
+}
+
 // TODO: Move all of this CLI-related code to a separate package.
 func main() {
 	log.SetOutput(os.Stderr)
 
 	inputFile := flag.String("f", "", "Input file")
+	inputTemplate := flag.String("template", "{{.Data}}", "Template for each object in the input file (prefix with @ to use a file)")
 	batchSize := flag.Int("s", 10, "Number of items per batch")
 	numRuns := flag.Int("r", 10, "Number of runs")
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
-	initialPrompt := flag.String("p", "", "Initial prompt")
+	initialPrompt := flag.String("p", "", "Initial prompt (prefix with @ to use a file)")
+	outputFile := flag.String("o", "", "JSON output file")
+
+	ollamaURL := flag.String("ollama-url", "http://localhost:11434/api/chat", "Ollama API URL")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
-	flag.BoolVar(&dryRun, "dry-run", false, "Enable dry run mode (log API calls without making them)")
+	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
+	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
+
+	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	flag.Parse()
 
@@ -172,7 +309,7 @@ func main() {
 	var tokenLimitThreshold = int(0.95 * float64(*batchTokens))
 
 	if *inputFile == "" {
-		log.Println("Usage: go run main.go -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-ratio <refinement_ratio>]")
+		log.Println("Usage: raink -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-ratio <refinement_ratio>]")
 		return
 	}
 
@@ -181,32 +318,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiKey := os.Getenv("OPENAI_API_KEY")
-
-	apiURL := os.Getenv("OLLAMA_API_URL")
-	if apiURL == "" {
-		apiURL = "http://localhost:11434/api/chat"
+	userPrompt := *initialPrompt
+	if strings.HasPrefix(userPrompt, "@") {
+		filePath := strings.TrimPrefix(userPrompt, "@")
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			log.Fatalf("Error reading initial prompt file: %v", err)
+		}
+		userPrompt = string(content)
 	}
 
-	// TODO: Make this configurable.
-	// https://pkg.go.dev/github.com/openai/openai-go@v0.1.0-alpha.38#ChatModel
-	// const model = openai.ChatModelGPT4o2024_08_06
-	const model = openai.ChatModelGPT4oMini
-
-	const enc = "o200k_base"
-
 	config := &Config{
-		InitialPrompt:   *initialPrompt,
+		InitialPrompt:   userPrompt,
 		BatchSize:       *batchSize,
 		NumRuns:         *numRuns,
 		OllamaModel:     *ollamaModel,
+		OpenAIModel:     *oaiModel,
 		TokenLimit:      tokenLimitThreshold,
 		RefinementRatio: *refinementRatio,
-		OpenAIKey:       apiKey,
-		OllamaAPIURL:    apiURL,
-		OpenAIModel:     model,
-		Encoding:        enc,
+		OpenAIKey:       os.Getenv("OPENAI_API_KEY"),
+		OllamaAPIURL:    *ollamaURL,
+		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
+		DryRun:          *dryRun,
 	}
 
 	ranker, err := NewRanker(config)
@@ -214,71 +348,21 @@ func main() {
 		log.Fatal(err)
 	}
 
-	file, err := os.Open(*inputFile)
+	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer file.Close()
 
-	var objects []Object
-	reader := bufio.NewReader(file)
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			log.Fatal(err)
+	// check that no object is too large
+	for _, obj := range objects {
+		tokens := ranker.estimateTokens([]Object{obj})
+		if tokens > *batchTokens {
+			log.Fatalf("Object is too large with %d tokens:\n%s", tokens, obj.Value)
 		}
-		line = strings.TrimSpace(line)
-		id := ShortDeterministicID(line, idLen)
-		objects = append(objects, Object{ID: id, Value: line})
 	}
 
 	// Dynamically adjust batch size upfront.
-	// TODO: Move this to a separate function.
-	samples := 10
-	for {
-		valid := true
-		var estTotalTokens int
-		var numBatches int
-
-		for i := 0; i < samples; i++ {
-			ranker.rng.Shuffle(len(objects), func(i, j int) {
-				objects[i], objects[j] = objects[j], objects[i]
-			})
-			numBatches = len(objects) / ranker.cfg.BatchSize
-			for j := 0; j < numBatches; j++ {
-				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
-				estBatchTokens := ranker.estimateTokens(batch)
-				estTotalTokens += estBatchTokens
-				if estBatchTokens > ranker.cfg.TokenLimit {
-					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
-					ranker.logTokenSizes(batch)
-					valid = false
-					break
-				}
-			}
-			if !valid {
-				break
-			}
-		}
-
-		if numBatches > 0 {
-			avgEstTokens := estTotalTokens / (samples * numBatches)
-			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
-			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
-		}
-
-		if valid {
-			break
-		}
-		ranker.cfg.BatchSize--
-		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
-		if ranker.cfg.BatchSize == 0 {
-			log.Fatal("Cannot create a valid batch within the token limit")
-		}
-	}
+	ranker.AdjustBatchSize(objects, 10)
 
 	// Recursive processing
 	finalResults := ranker.Rank(objects, 1)
@@ -293,8 +377,13 @@ func main() {
 		panic(err)
 	}
 
-	if !dryRun {
+	if !config.DryRun {
 		fmt.Println(string(jsonResults))
+	}
+
+	if *outputFile != "" {
+		os.WriteFile(*outputFile, jsonResults, 0644)
+		log.Printf("Results written to %s\n", *outputFile)
 	}
 }
 
@@ -314,6 +403,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 			{
 				Key:      objects[0].ID,
 				Value:    objects[0].Value,
+				Object:   objects[0].Object,
 				Score:    0, // 0 is guaranteed to be the "highest" score.
 				Exposure: 1,
 			},
@@ -355,7 +445,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 
 	var topPortionObjects []Object
 	for _, result := range topPortion {
-		topPortionObjects = append(topPortionObjects, Object{ID: result.Key, Value: result.Value})
+		topPortionObjects = append(topPortionObjects, Object{ID: result.Key, Value: result.Value, Object: result.Object})
 	}
 
 	refinedTopPortion := r.Rank(topPortionObjects, round+1)
@@ -467,6 +557,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 				results = append(results, FinalResult{
 					Key:      id,
 					Value:    obj.Value,
+					Object:   obj.Object,
 					Score:    score,
 					Exposure: exposureCounts[id], // Include exposure count
 				})
@@ -542,7 +633,7 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
 
-	if dryRun {
+	if r.cfg.DryRun {
 		log.Printf("Dry run API call")
 		// Simulate a ranked response for dry run
 		var rankedObjects []RankedObject
