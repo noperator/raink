@@ -117,6 +117,7 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 				if estBatchTokens > ranker.cfg.TokenLimit {
 					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
 					ranker.logTokenSizes(batch)
+					valid = false
 					break
 				}
 			}
