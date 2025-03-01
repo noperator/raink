@@ -27,7 +27,10 @@ import (
 	"github.com/pkoukk/tiktoken-go"
 )
 
-const idLen = 8
+const (
+	idLen        = 8
+	minBatchSize = 2
+)
 
 /*
 When deciding whether a value belongs in Config or Ranker structs, consider the following:
@@ -69,6 +72,9 @@ func (c *Config) Validate() error {
 	}
 	if c.OllamaModel == "" && c.OpenAIKey == "" {
 		return fmt.Errorf("openai key cannot be empty")
+	}
+	if c.BatchSize < minBatchSize {
+		return fmt.Errorf("batch size must be at least %d", minBatchSize)
 	}
 	return nil
 }
@@ -112,7 +118,7 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 			numBatches = len(objects) / ranker.cfg.BatchSize
 			for j := 0; j < numBatches; j++ {
 				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
-				estBatchTokens := ranker.estimateTokens(batch)
+				estBatchTokens := ranker.estimateTokens(batch, true)
 				estTotalTokens += estBatchTokens
 				if estBatchTokens > ranker.cfg.TokenLimit {
 					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
@@ -126,20 +132,17 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 			}
 		}
 
-		if numBatches > 0 {
-			avgEstTokens := estTotalTokens / (samples * numBatches)
-			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.BatchTokens) * 100
-			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.BatchTokens)
-		}
-
 		if valid {
+			avgEstTokens := estTotalTokens / (samples * numBatches)
+			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.TokenLimit) * 100
+			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.TokenLimit)
 			break
+		}
+		if ranker.cfg.BatchSize <= minBatchSize {
+			log.Fatal("Cannot create a valid batch within the token limit")
 		}
 		ranker.cfg.BatchSize--
 		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
-		if ranker.cfg.BatchSize == 0 {
-			log.Fatal("Cannot create a valid batch within the token limit")
-		}
 	}
 }
 
@@ -356,7 +359,7 @@ func main() {
 
 	// check that no object is too large
 	for _, obj := range objects {
-		tokens := ranker.estimateTokens([]Object{obj})
+		tokens := ranker.estimateTokens([]Object{obj}, true)
 		if tokens > *batchTokens {
 			log.Fatalf("Object is too large with %d tokens:\n%s", tokens, obj.Value)
 		}
@@ -577,7 +580,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 func (r *Ranker) logTokenSizes(group []Object) {
 	log.Println("Logging token sizes for each object in the batch:")
 	for _, obj := range group {
-		tokenSize := r.estimateTokens([]Object{obj})
+		tokenSize := r.estimateTokens([]Object{obj}, false)
 		valuePreview := obj.Value
 		if len(valuePreview) > 100 {
 			valuePreview = valuePreview[:100]
@@ -613,18 +616,21 @@ const missingIDsStr = "Your last response was missing the following IDs: [%s]. "
 
 const invalidJSONStr = "Your last response was not valid JSON. Try again!"
 
-func (r *Ranker) estimateTokens(group []Object) int {
-	prompt := r.cfg.InitialPrompt + promptDisclaimer
+func (r *Ranker) estimateTokens(group []Object, includePrompt bool) int {
+	text := ""
+	if includePrompt {
+		text += r.cfg.InitialPrompt + promptDisclaimer
+	}
 	for _, obj := range group {
-		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+		text += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
 	}
 
 	if r.cfg.OllamaModel != "" {
 		// TODO: Update to use Ollama tokenize API when this PR is merged:
 		// https://github.com/ollama/ollama/pull/6586
-		return len(prompt) / 4
+		return len(text) / 4
 	} else {
-		return len(r.encoding.Encode(prompt, nil, nil))
+		return len(r.encoding.Encode(text, nil, nil))
 	}
 }
 
