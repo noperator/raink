@@ -196,7 +196,7 @@ func ShortDeterministicID(input string, length int) string {
 	return base64Encoded[:length]
 }
 
-func loadObjectsFromFile(filePath string, templateData string) (objects []Object, err error) {
+func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []Object, err error) {
 	var tmpl *template.Template
 	if templateData != "" {
 		if templateData[0] == '@' {
@@ -218,7 +218,7 @@ func loadObjectsFromFile(filePath string, templateData string) (objects []Object
 	defer file.Close()
 
 	ext := strings.ToLower(filepath.Ext(filePath))
-	if ext == ".json" {
+	if ext == ".json" || forceJSON {
 		// parse the file in an opaque array
 		var data []interface{}
 		if err := json.NewDecoder(file).Decode(&data); err != nil {
@@ -280,6 +280,7 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	inputFile := flag.String("f", "", "Input file")
+	forceJSON := flag.Bool("json", false, "Force JSON parsing regardless of file extension")
 	inputTemplate := flag.String("template", "{{.Data}}", "Template for each object in the input file (prefix with @ to use a file)")
 	batchSize := flag.Int("s", 10, "Number of items per batch")
 	numRuns := flag.Int("r", 10, "Number of runs")
@@ -348,7 +349,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate)
+	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate, *forceJSON)
 	if err != nil {
 		log.Fatal(err)
 	}
