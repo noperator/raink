@@ -115,9 +115,9 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 			ranker.rng.Shuffle(len(objects), func(i, j int) {
 				objects[i], objects[j] = objects[j], objects[i]
 			})
-			numBatches = len(objects) / ranker.cfg.BatchSize
+			numBatches = max(1, len(objects)/ranker.cfg.BatchSize) // Need at least one batch.
 			for j := 0; j < numBatches; j++ {
-				batch := objects[j*ranker.cfg.BatchSize : (j+1)*ranker.cfg.BatchSize]
+				batch := objects[j*ranker.cfg.BatchSize : (j+1)*min(len(objects), ranker.cfg.BatchSize)] // Don't index more objects than we have.
 				estBatchTokens := ranker.estimateTokens(batch, true)
 				estTotalTokens += estBatchTokens
 				if estBatchTokens > ranker.cfg.TokenLimit {
