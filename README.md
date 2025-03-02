@@ -34,7 +34,7 @@ Set your `OPENAI_API_KEY` environment variable.
 ### Usage
 
 ```
-raink  -h
+raink -h
 Usage of raink:
   -dry-run
     	Enable dry run mode (log API calls without making them)
@@ -42,6 +42,8 @@ Usage of raink:
     	Tokenizer encoding (default "o200k_base")
   -f string
     	Input file
+  -json
+    	Force JSON parsing regardless of file extension
   -o string
     	JSON output file
   -ollama-model string
@@ -62,7 +64,6 @@ Usage of raink:
     	Max tokens per batch (default 128000)
   -template string
     	Template for each object in the input file (prefix with @ to use a file) (default "{{.Data}}")
-
 ```
 
 Compares 100 [sentences](https://github.com/noperator/raink/blob/main/testdata/sentences.txt) in under 2 min.
@@ -109,7 +110,7 @@ For instance, two objects would be loaded and ranked from this document:
 
 #### Templates
 
-It is possible to include each element from the input file in a template using the [golang template syntax](https://pkg.go.dev/text/template) via the `-template "template string"` (or `-template @file.tpl`) argument.
+It is possible to include each element from the input file in a template using the [Go template syntax](https://pkg.go.dev/text/template) via the `-template "template string"` (or `-template @file.tpl`) argument.
 
 For text input files, each line can be referenced in the template with the `Data` variable:
 
@@ -125,12 +126,39 @@ For JSON input files, each object in the array can be referenced directly. For i
 {{ .code }}
 ```
 
+Note in the following example that the resulting `value` key contains the actual value being presented for ranking (as described by the template), while the `object` key contains the entire original object from the input file for easy reference.
+
+```
+# Create some test JSON data.
+seq 9 |
+    paste -d @ - - - |
+    parallel 'echo {} | tr @ "\n" | jo -a | jo nums=:/dev/stdin' |
+    jo -a |
+    tee input.json
+
+[{"nums":[1,2,3]},{"nums":[4,5,6]},{"nums":[7,8,9]}]
+
+# Use template to extract the first element of the nums array in each input object.
+raink \
+	-f input.json \
+	-template '{{ index .nums 0 }}' \
+	-p 'Which is biggest?' \
+	-r 1 |
+	jq -c '.[]'
+
+{"key":"eQJpm-Qs","value":"7","object":{"nums":[7,8,9]},"score":0,"exposure":1,"rank":1}
+{"key":"SyJ3d9Td","value":"4","object":{"nums":[4,5,6]},"score":2,"exposure":1,"rank":2}
+{"key":"a4ayc_80","value":"1","object":{"nums":[1,2,3]},"score":3,"exposure":1,"rank":3}
+```
+
 ## Back matter
 
 ### See also
 
 - [Hard problems that reduce to document ranking](https://noperator.dev/posts/document-ranking-for-complex-problems/)
-- [raink: Use LLMs for Document Ranking](https://bishopfox.com/blog/raink-llms-document-ranking)
+- [Commentary: Critical Thinking - Bug Bounty Podcast](https://youtu.be/qd08UBNpu7k?si=pMVEYtmKnyuJkL9B&t=1511)
+- [Discussion: Hacker News](https://news.ycombinator.com/item?id=43174910)
+- [Raink: Use LLMs for Document Ranking](https://bishopfox.com/blog/raink-llms-document-ranking)
 - [Patch Perfect: Harmonizing with LLMs to Find Security Vulns](https://www.youtube.com/watch?v=IBuL1zY69tY)
 - [Large Language Models are Effective Text Rankers with Pairwise Ranking Prompting](https://arxiv.org/html/2306.17563v2)
 - [Introducing Rerank 3.5: Precise AI Search](https://cohere.com/blog/rerank-3pt5)
@@ -147,11 +175,13 @@ For JSON input files, each object in the array can be referenced directly. For i
 - [x] automatically calculate optimal batch size?
 - [x] explore "tournament" sort vs complete exposure each time
 - [x] add parameter for refinement ratio
-- [ ] add blog link
+- [x] add blog link
 - [x] support non-OpenAI models
-- [ ] add boolean refinement flag
+- [ ] add ~boolean~ refinement ratio flag
 - [ ] separate package and cli tool
-- [ ] add python bindings
+- [ ] add python bindings?
+- [ ] clarify when prompt included in token estimate
+- [ ] remove token limit threshold? potentially confusing/unnecessary
 
 ### License
 
