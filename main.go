@@ -42,19 +42,19 @@ When deciding whether a value belongs in Config or Ranker structs, consider the 
 */
 
 type Config struct {
-	InitialPrompt   string
-	BatchSize       int
-	NumRuns         int
-	OllamaModel     string
-	OpenAIModel     openai.ChatModel
-	TokenLimit      int
-	RefinementRatio float64
-	OpenAIKey       string
-	OllamaAPIURL    string
-	Encoding        string
-	BatchTokens     int
-	DryRun          bool
-	SnapshotFile    string
+	InitialPrompt   string           `json:"initial_prompt"`
+	BatchSize       int              `json:"batch_size"`
+	NumRuns         int              `json:"num_runs"`
+	OllamaModel     string           `json:"ollama_model"`
+	OpenAIModel     openai.ChatModel `json:"openai_model"`
+	TokenLimit      int              `json:"token_limit"`
+	RefinementRatio float64          `json:"refinement_ratio"`
+	OpenAIKey       string           `json:"-"`
+	OllamaAPIURL    string           `json:"-"`
+	Encoding        string           `json:"encoding"`
+	BatchTokens     int              `json:"batch_tokens"`
+	DryRun          bool             `json:"-"`
+	TraceFile       string           `json:"-"`
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -113,6 +113,12 @@ type Ranker struct {
 	snapshots  []Snapshot
 }
 
+// TraceFile represents the top-level structure of the trace JSON file
+type TraceFile struct {
+	Data []Snapshot `json:"data"`
+	Cfg  Config     `json:"cfg"`
+}
+
 func NewRanker(config *Config) (*Ranker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -137,19 +143,24 @@ func (r *Ranker) saveSnapshot(snapshot Snapshot) {
 	r.snapshots = append(r.snapshots, snapshot)
 
 	// Only write snapshots if a file path is specified
-	if r.cfg.SnapshotFile == "" {
+	if r.cfg.TraceFile == "" {
 		return
 	}
 
-	data, err := json.MarshalIndent(r.snapshots, "", "  ")
+	traceFile := TraceFile{
+		Data: r.snapshots,
+		Cfg:  *r.cfg,
+	}
+
+	data, err := json.MarshalIndent(traceFile, "", "  ")
 	if err != nil {
-		log.Printf("Error marshaling snapshots: %v", err)
+		log.Printf("Error marshaling trace: %v", err)
 		return
 	}
 
-	err = os.WriteFile(r.cfg.SnapshotFile, data, 0644)
+	err = os.WriteFile(r.cfg.TraceFile, data, 0644)
 	if err != nil {
-		log.Printf("Error writing snapshots to file: %v", err)
+		log.Printf("Error writing trace to file: %v", err)
 	}
 }
 
@@ -348,7 +359,7 @@ func main() {
 
 	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
-	snapshotFile := flag.String("trace", "", "Write ranking snapshots to file")
+	traceFile := flag.String("trace", "", "Write ranking snapshots to file")
 	flag.Parse()
 
 	// TODO: This should be a more resilient check. We're assuming that if the
@@ -396,7 +407,7 @@ func main() {
 		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
 		DryRun:          *dryRun,
-		SnapshotFile:    *snapshotFile,
+		TraceFile:       *traceFile,
 	}
 
 	ranker, err := NewRanker(config)
@@ -557,7 +568,6 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	return finalResults
 }
 
-// TODO: Also log the request/retry attempt number.
 func (r *Ranker) logFromApiCall(runNum, batchNum int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Round %d, Run %*d/%d, Batch %*d/%d: "+message, r.round, len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches)
 	log.Printf(formattedMessage, args...)
