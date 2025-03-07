@@ -1,4 +1,4 @@
-module github.com/bishopfox/raink
+module github.com/noperator/raink
 
 go 1.23.4
 
