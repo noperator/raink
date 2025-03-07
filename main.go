@@ -54,6 +54,7 @@ type Config struct {
 	Encoding        string
 	BatchTokens     int
 	DryRun          bool
+	SnapshotFile    string
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -79,12 +80,37 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+type SnapshotType string
+
+const (
+	SnapshotTypeRound SnapshotType = "round"
+	SnapshotTypeRun   SnapshotType = "run"
+	SnapshotTypeBatch SnapshotType = "batch"
+)
+
+type Snapshot struct {
+	Type       SnapshotType     `json:"type"`
+	Timestamp  time.Time        `json:"timestamp"`
+	Round      int              `json:"round"`
+	Run        int              `json:"run,omitempty"`
+	Batch      int              `json:"batch,omitempty"`
+	PivotIndex int              `json:"pivot_idx"` // Index above which items are refined, below which are stored
+	Objects    []RankedSnapshot `json:"objects"`
+}
+
+type RankedSnapshot struct {
+	ID    string  `json:"id"`
+	Rank  int     `json:"rank"`
+	Score float64 `json:"score"`
+}
+
 type Ranker struct {
 	cfg        *Config
 	encoding   *tiktoken.Tiktoken
 	rng        *rand.Rand
 	numBatches int
 	round      int
+	snapshots  []Snapshot
 }
 
 func NewRanker(config *Config) (*Ranker, error) {
@@ -98,10 +124,33 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}
 
 	return &Ranker{
-		cfg:      config,
-		encoding: encoding,
-		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
+		cfg:       config,
+		encoding:  encoding,
+		rng:       rand.New(rand.NewSource(time.Now().UnixNano())),
+		snapshots: make([]Snapshot, 0),
 	}, nil
+}
+
+func (r *Ranker) saveSnapshot(snapshot Snapshot) {
+	// Ensure timestamp is in UTC
+	snapshot.Timestamp = snapshot.Timestamp.UTC()
+	r.snapshots = append(r.snapshots, snapshot)
+
+	// Only write snapshots if a file path is specified
+	if r.cfg.SnapshotFile == "" {
+		return
+	}
+
+	data, err := json.MarshalIndent(r.snapshots, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling snapshots: %v", err)
+		return
+	}
+
+	err = os.WriteFile(r.cfg.SnapshotFile, data, 0644)
+	if err != nil {
+		log.Printf("Error writing snapshots to file: %v", err)
+	}
 }
 
 func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
@@ -299,6 +348,7 @@ func main() {
 
 	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
 	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
+	snapshotFile := flag.String("trace", "", "Write ranking snapshots to file")
 	flag.Parse()
 
 	// TODO: This should be a more resilient check. We're assuming that if the
@@ -346,6 +396,7 @@ func main() {
 		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
 		DryRun:          *dryRun,
+		SnapshotFile:    *snapshotFile,
 	}
 
 	ranker, err := NewRanker(config)
@@ -404,15 +455,23 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 
 	// If we've narrowed down to a single object, we're done.
 	if len(objects) == 1 {
-		return []FinalResult{
-			{
-				Key:      objects[0].ID,
-				Value:    objects[0].Value,
-				Object:   objects[0].Object,
-				Score:    0, // 0 is guaranteed to be the "highest" score.
-				Exposure: 1,
-			},
+		result := FinalResult{
+			Key:      objects[0].ID,
+			Value:    objects[0].Value,
+			Object:   objects[0].Object,
+			Score:    0, // 0 is guaranteed to be the "highest" score.
+			Exposure: 1,
 		}
+		// Save final snapshot with pivot index 0 and score
+		snapshot := Snapshot{
+			Type:       SnapshotTypeRound,
+			Timestamp:  time.Now(),
+			Round:      round,
+			Objects:    []RankedSnapshot{{ID: result.Key, Rank: 1, Score: result.Score}},
+			PivotIndex: 0,
+		}
+		r.saveSnapshot(snapshot)
+		return []FinalResult{result}
 	}
 
 	// Downstream ranking gets unhappy if we try to rank more objects than we
@@ -422,18 +481,49 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	}
 
 	r.numBatches = len(objects) / r.cfg.BatchSize
+	if r.numBatches == 0 {
+		r.numBatches = 1
+	}
 
 	// Process the objects and get the sorted results.
 	results := r.shuffleBatchRank(objects)
 
+	// Create and save round snapshot
+	mid := int(float64(len(results)) * r.cfg.RefinementRatio)
+	snapshot := Snapshot{
+		Type:       SnapshotTypeRound,
+		Timestamp:  time.Now(),
+		Round:      round,
+		Objects:    make([]RankedSnapshot, len(results)),
+		PivotIndex: mid,
+	}
+
+	for i, result := range results {
+		snapshot.Objects[i] = RankedSnapshot{
+			ID:    result.Key,
+			Rank:  i + 1,
+			Score: result.Score,
+		}
+	}
+
+	r.saveSnapshot(snapshot)
+
 	// If the refinement ratio is 0, that effectively means we're refining
 	// _none_ of the top objects, so we're done.
 	if r.cfg.RefinementRatio == 0 {
+		// Save final snapshot with pivot index 0
+		finalSnapshot := Snapshot{
+			Type:       SnapshotTypeRound,
+			Timestamp:  time.Now(),
+			Round:      round,
+			Objects:    snapshot.Objects,
+			PivotIndex: 0,
+		}
+		r.saveSnapshot(finalSnapshot)
 		return results
 	}
 
-	// Calculate the mid index based on the refinement ratio.
-	mid := int(float64(len(results)) * r.cfg.RefinementRatio)
+	// Use the already calculated mid index for splitting
 	topPortion := results[:mid]
 	bottomPortion := results[mid:]
 
@@ -534,7 +624,53 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 			}
 		}
 
-		// Save remainder items from the first run
+		// Create run snapshot after all batches in this run are complete
+		var runResults []FinalResult
+		for id, scoreList := range scores {
+			var sum float64
+			for _, score := range scoreList {
+				sum += score
+			}
+			avgScore := sum / float64(len(scoreList))
+
+			for _, obj := range objects {
+				if obj.ID == id {
+					runResults = append(runResults, FinalResult{
+						Key:      id,
+						Value:    obj.Value,
+						Object:   obj.Object,
+						Score:    avgScore,
+						Exposure: exposureCounts[id],
+					})
+					break
+				}
+			}
+		}
+
+		// Sort run results by score
+		sort.Slice(runResults, func(i, j int) bool {
+			return runResults[i].Score < runResults[j].Score
+		})
+
+		// Save run snapshot
+		snapshot := Snapshot{
+			Type:      SnapshotTypeRun,
+			Timestamp: time.Now(),
+			Round:     r.round,
+			Run:       i + 1,
+			Objects:   make([]RankedSnapshot, len(runResults)),
+		}
+
+		for i, result := range runResults {
+			snapshot.Objects[i] = RankedSnapshot{
+				ID:    result.Key,
+				Rank:  i + 1,
+				Score: result.Score,
+			}
+		}
+		r.saveSnapshot(snapshot)
+
+		// Save remainder items from first run
 		if i == 0 {
 			remainderStart := r.numBatches * r.cfg.BatchSize
 			if remainderStart < len(objects) {
@@ -678,6 +814,26 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 			}
 		}
 	}
+
+	// Create and save batch snapshot
+	snapshot := Snapshot{
+		Type:      SnapshotTypeBatch,
+		Timestamp: time.Now(),
+		Round:     r.round,
+		Run:       runNumber,
+		Batch:     batchNumber,
+		Objects:   make([]RankedSnapshot, len(rankedObjects)),
+	}
+
+	for i, obj := range rankedObjects {
+		snapshot.Objects[i] = RankedSnapshot{
+			ID:    obj.Object.ID,
+			Rank:  i + 1,
+			Score: obj.Score,
+		}
+	}
+
+	r.saveSnapshot(snapshot)
 
 	return rankedObjects
 }

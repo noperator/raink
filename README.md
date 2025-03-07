@@ -64,6 +64,8 @@ Usage of raink:
     	Max tokens per batch (default 128000)
   -template string
     	Template for each object in the input file (prefix with @ to use a file) (default "{{.Data}}")
+  -trace string
+    	Write ranking snapshots to file
 ```
 
 Compares 100 [sentences](https://github.com/noperator/raink/blob/main/testdata/sentences.txt) in under 2 min.
@@ -182,6 +184,7 @@ raink \
 - [ ] add python bindings?
 - [ ] clarify when prompt included in token estimate
 - [ ] remove token limit threshold? potentially confusing/unnecessary
+- [ ] print stats: requests sent, tokens used, time taken, money spent
 
 ### License
 
