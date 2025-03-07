@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -42,19 +43,20 @@ When deciding whether a value belongs in Config or Ranker structs, consider the 
 */
 
 type Config struct {
-	InitialPrompt   string           `json:"initial_prompt"`
-	BatchSize       int              `json:"batch_size"`
-	NumRuns         int              `json:"num_runs"`
-	OllamaModel     string           `json:"ollama_model"`
-	OpenAIModel     openai.ChatModel `json:"openai_model"`
-	TokenLimit      int              `json:"token_limit"`
-	RefinementRatio float64          `json:"refinement_ratio"`
-	OpenAIKey       string           `json:"-"`
-	OllamaAPIURL    string           `json:"-"`
-	Encoding        string           `json:"encoding"`
-	BatchTokens     int              `json:"batch_tokens"`
-	DryRun          bool             `json:"-"`
-	TraceFile       string           `json:"-"`
+	InitialPrompt     string           `json:"initial_prompt"`
+	BatchSize         int              `json:"batch_size"`
+	AdjustedBatchSize int              `json:"-"`
+	NumRuns           int              `json:"num_runs"`
+	OllamaModel       string           `json:"ollama_model"`
+	OpenAIModel       openai.ChatModel `json:"openai_model"`
+	TokenLimit        int              `json:"token_limit"`
+	RefinementRatio   float64          `json:"refinement_ratio"`
+	OpenAIKey         string           `json:"-"`
+	OllamaAPIURL      string           `json:"-"`
+	Encoding          string           `json:"encoding"`
+	BatchTokens       int              `json:"batch_tokens"`
+	DryRun            bool             `json:"-"`
+	TraceFile         string           `json:"-"`
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -105,12 +107,13 @@ type RankedSnapshot struct {
 }
 
 type Ranker struct {
-	cfg        *Config
-	encoding   *tiktoken.Tiktoken
-	rng        *rand.Rand
-	numBatches int
-	round      int
-	snapshots  []Snapshot
+	cfg            *Config
+	encoding       *tiktoken.Tiktoken
+	rng            *rand.Rand
+	numBatches     int
+	round          int
+	snapshots      []Snapshot
+	snapshotsMutex sync.Mutex
 }
 
 // TraceFile represents the top-level structure of the trace JSON file
@@ -137,15 +140,22 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}, nil
 }
 
-func (r *Ranker) saveSnapshot(snapshot Snapshot) {
+func (r *Ranker) appendSnapshot(snapshot Snapshot) {
+	r.snapshotsMutex.Lock()
+	defer r.snapshotsMutex.Unlock()
+
 	// Ensure timestamp is in UTC
 	snapshot.Timestamp = snapshot.Timestamp.UTC()
 	r.snapshots = append(r.snapshots, snapshot)
+}
 
-	// Only write snapshots if a file path is specified
+func (r *Ranker) saveTrace() {
+	// Only write trace if a file path is specified
 	if r.cfg.TraceFile == "" {
 		return
 	}
+
+	r.cfg.BatchSize = r.cfg.AdjustedBatchSize
 
 	traceFile := TraceFile{
 		Data: r.snapshots,
@@ -395,19 +405,20 @@ func main() {
 	}
 
 	config := &Config{
-		InitialPrompt:   userPrompt,
-		BatchSize:       *batchSize,
-		NumRuns:         *numRuns,
-		OllamaModel:     *ollamaModel,
-		OpenAIModel:     *oaiModel,
-		TokenLimit:      tokenLimitThreshold,
-		RefinementRatio: *refinementRatio,
-		OpenAIKey:       os.Getenv("OPENAI_API_KEY"),
-		OllamaAPIURL:    *ollamaURL,
-		Encoding:        *encoding,
-		BatchTokens:     *batchTokens,
-		DryRun:          *dryRun,
-		TraceFile:       *traceFile,
+		InitialPrompt:     userPrompt,
+		BatchSize:         *batchSize,
+		AdjustedBatchSize: *batchSize, // Initialize to same as BatchSize
+		NumRuns:           *numRuns,
+		OllamaModel:       *ollamaModel,
+		OpenAIModel:       *oaiModel,
+		TokenLimit:        tokenLimitThreshold,
+		RefinementRatio:   *refinementRatio,
+		OpenAIKey:         os.Getenv("OPENAI_API_KEY"),
+		OllamaAPIURL:      *ollamaURL,
+		Encoding:          *encoding,
+		BatchTokens:       *batchTokens,
+		DryRun:            *dryRun,
+		TraceFile:         *traceFile,
 	}
 
 	ranker, err := NewRanker(config)
@@ -430,6 +441,7 @@ func main() {
 
 	// Dynamically adjust batch size upfront.
 	ranker.AdjustBatchSize(objects, 10)
+	ranker.cfg.AdjustedBatchSize = ranker.cfg.BatchSize
 
 	// Recursive processing
 	finalResults := ranker.Rank(objects, 1)
@@ -447,6 +459,9 @@ func main() {
 	if !config.DryRun {
 		fmt.Println(string(jsonResults))
 	}
+
+	// Save trace file at the end of execution
+	ranker.saveTrace()
 
 	if *outputFile != "" {
 		os.WriteFile(*outputFile, jsonResults, 0644)
@@ -481,7 +496,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 			Objects:    []RankedSnapshot{{ID: result.Key, Rank: 1, Score: result.Score}},
 			PivotIndex: 0,
 		}
-		r.saveSnapshot(snapshot)
+		r.appendSnapshot(snapshot)
 		return []FinalResult{result}
 	}
 
@@ -517,7 +532,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 		}
 	}
 
-	r.saveSnapshot(snapshot)
+	r.appendSnapshot(snapshot)
 
 	// If the refinement ratio is 0, that effectively means we're refining
 	// _none_ of the top objects, so we're done.
@@ -530,7 +545,7 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 			Objects:    snapshot.Objects,
 			PivotIndex: 0,
 		}
-		r.saveSnapshot(finalSnapshot)
+		r.appendSnapshot(finalSnapshot)
 		return results
 	}
 
@@ -678,7 +693,7 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 				Score: result.Score,
 			}
 		}
-		r.saveSnapshot(snapshot)
+		r.appendSnapshot(snapshot)
 
 		// Save remainder items from first run
 		if i == 0 {
@@ -843,7 +858,7 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 		}
 	}
 
-	r.saveSnapshot(snapshot)
+	r.appendSnapshot(snapshot)
 
 	return rankedObjects
 }
