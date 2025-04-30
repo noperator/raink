@@ -42,18 +42,19 @@ When deciding whether a value belongs in Config or Ranker structs, consider the 
 */
 
 type Config struct {
-	InitialPrompt   string
-	BatchSize       int
-	NumRuns         int
-	OllamaModel     string
-	OpenAIModel     openai.ChatModel
-	TokenLimit      int
-	RefinementRatio float64
-	OpenAIKey       string
-	OllamaAPIURL    string
-	Encoding        string
-	BatchTokens     int
-	DryRun          bool
+	InitialPrompt   string           `json:"initial_prompt"`
+	BatchSize       int              `json:"batch_size"`
+	NumRuns         int              `json:"num_runs"`
+	OllamaModel     string           `json:"ollama_model"`
+	OpenAIModel     openai.ChatModel `json:"openai_model"`
+	TokenLimit      int              `json:"token_limit"`
+	RefinementRatio float64          `json:"refinement_ratio"`
+	OpenAIKey       string           `json:"-"`
+	OpenAIAPIURL    string           `json:"-"`
+	OllamaAPIURL    string           `json:"-"`
+	Encoding        string           `json:"encoding"`
+	BatchTokens     int              `json:"batch_tokens"`
+	DryRun          bool             `json:"-"`
 }
 
 // TODO: Move all CLI flag validation this func instead.
@@ -70,7 +71,7 @@ func (c *Config) Validate() error {
 	if c.TokenLimit <= 0 {
 		return fmt.Errorf("token limit must be greater than 0")
 	}
-	if c.OllamaModel == "" && c.OpenAIKey == "" {
+	if c.OllamaModel == "" && c.OpenAIAPIURL == "" && c.OpenAIKey == "" {
 		return fmt.Errorf("openai key cannot be empty")
 	}
 	if c.BatchSize < minBatchSize {
@@ -298,6 +299,7 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434/api/chat", "Ollama API URL")
 	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
 	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
+	oaiURL := flag.String("openai-url", "", "OpenAI API base URL (e.g., for OpenAI-compatible API like vLLM)")
 	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
 
 	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
@@ -317,7 +319,7 @@ func main() {
 	var tokenLimitThreshold = int(0.95 * float64(*batchTokens))
 
 	if *inputFile == "" {
-		log.Println("Usage: raink -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-ratio <refinement_ratio>]")
+		log.Println("Usage: raink -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-openai-model <model_name>] [-openai-url <base_url>] [-ratio <refinement_ratio>]")
 		return
 	}
 
@@ -345,6 +347,7 @@ func main() {
 		TokenLimit:      tokenLimitThreshold,
 		RefinementRatio: *refinementRatio,
 		OpenAIKey:       os.Getenv("OPENAI_API_KEY"),
+		OpenAIAPIURL:    *oaiURL,
 		OllamaAPIURL:    *ollamaURL,
 		Encoding:        *encoding,
 		BatchTokens:     *batchTokens,
@@ -757,11 +760,23 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 	customTransport := &CustomTransport{Transport: http.DefaultTransport}
 	customClient := &http.Client{Transport: customTransport}
 
-	client := openai.NewClient(
+	clientOptions := []option.RequestOption{
 		option.WithAPIKey(r.cfg.OpenAIKey),
 		option.WithHTTPClient(customClient),
 		option.WithMaxRetries(5),
-	)
+	}
+
+	// Add base URL option if specified
+	if r.cfg.OpenAIAPIURL != "" {
+		// Ensure the URL ends with a trailing slash
+		baseURL := r.cfg.OpenAIAPIURL
+		if !strings.HasSuffix(baseURL, "/") {
+			baseURL += "/"
+		}
+		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
+	}
+
+	client := openai.NewClient(clientOptions...)
 
 	backoff := time.Second
 
