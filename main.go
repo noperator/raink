@@ -187,17 +187,20 @@ func GenerateSchema[T any]() interface{} {
 var RankedObjectResponseSchema = GenerateSchema[RankedObjectResponse]()
 
 func ShortDeterministicID(input string, length int) string {
-	// Step 1: Hash the input using SHA-256
+	// Keep only A-Za-z0-9 from Base64-encoded SHA-256 hash.
 	hash := sha256.Sum256([]byte(input))
-
-	// Step 2: Encode the hash in Base64 (URL-safe)
 	base64Encoded := base64.URLEncoding.EncodeToString(hash[:])
-
-	// Step 3: Truncate to the desired length
-	if length > len(base64Encoded) {
-		length = len(base64Encoded)
+	var result strings.Builder
+	for _, char := range base64Encoded {
+		if (char >= '0' && char <= '9') || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') {
+			result.WriteRune(char)
+		}
 	}
-	return base64Encoded[:length]
+	filtered := result.String()
+	if length > len(filtered) {
+		length = len(filtered)
+	}
+	return filtered[:length]
 }
 
 func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []Object, err error) {
