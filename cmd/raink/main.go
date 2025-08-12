@@ -85,30 +85,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	objects, err := raink.LoadObjectsFromFile(*inputFile, *inputTemplate, *forceJSON)
+	finalResults, err := ranker.RankFromFile(*inputFile, *inputTemplate, *forceJSON)
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	// check that no object is too large
-	for _, obj := range objects {
-		tokens := ranker.EstimateTokens([]raink.Object{obj}, true)
-		if tokens > *batchTokens {
-			log.Fatalf("object is too large with %d tokens:\n%s", tokens, obj.Value)
-		}
-	}
-
-	// Dynamically adjust batch size upfront.
-	if err := ranker.AdjustBatchSize(objects, 10); err != nil {
-		log.Fatal(err)
-	}
-
-	// Recursive processing
-	finalResults := ranker.Rank(objects, 1)
-
-	// Add the rank key to each final result based on its position in the list
-	for i := range finalResults {
-		finalResults[i].Rank = i + 1
 	}
 
 	jsonResults, err := json.MarshalIndent(finalResults, "", "  ")
