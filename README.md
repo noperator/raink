@@ -175,9 +175,9 @@ raink \
 - [x] add parameter for refinement ratio
 - [x] add blog link
 - [x] support non-OpenAI models
-- [ ] add ~boolean~ refinement ratio flag
+- [x] add ~boolean~ refinement ratio flag
 - [x] separate package and cli tool
-- [ ] add python bindings?
+- [ ] ~~add python bindings?~~
 - [ ] clarify when prompt included in token estimate
 - [ ] remove token limit threshold? potentially confusing/unnecessary
 
