@@ -50,7 +50,7 @@ func main() {
 	}
 
 	if *refinementRatio < 0 || *refinementRatio >= 1 {
-		fmt.Println("Error: Refinement ratio must be >= 0 and < 1")
+		fmt.Println("refinement ratio must be >= 0 and < 1")
 		os.Exit(1)
 	}
 
@@ -59,7 +59,7 @@ func main() {
 		filePath := strings.TrimPrefix(userPrompt, "@")
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			log.Fatalf("Error reading initial prompt file: %v", err)
+			log.Fatalf("could not read initial prompt file: %v", err)
 		}
 		userPrompt = string(content)
 	}
@@ -94,12 +94,14 @@ func main() {
 	for _, obj := range objects {
 		tokens := ranker.EstimateTokens([]raink.Object{obj}, true)
 		if tokens > *batchTokens {
-			log.Fatalf("Object is too large with %d tokens:\n%s", tokens, obj.Value)
+			log.Fatalf("object is too large with %d tokens:\n%s", tokens, obj.Value)
 		}
 	}
 
 	// Dynamically adjust batch size upfront.
-	ranker.AdjustBatchSize(objects, 10)
+	if err := ranker.AdjustBatchSize(objects, 10); err != nil {
+		log.Fatal(err)
+	}
 
 	// Recursive processing
 	finalResults := ranker.Rank(objects, 1)
@@ -111,7 +113,7 @@ func main() {
 
 	jsonResults, err := json.MarshalIndent(finalResults, "", "  ")
 	if err != nil {
-		panic(err)
+		log.Fatalf("could not marshal results to JSON: %v", err)
 	}
 
 	if !config.DryRun {
@@ -120,6 +122,6 @@ func main() {
 
 	if *outputFile != "" {
 		os.WriteFile(*outputFile, jsonResults, 0644)
-		log.Printf("Results written to %s\n", *outputFile)
+		log.Printf("results written to %s\n", *outputFile)
 	}
 }

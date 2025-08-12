@@ -106,7 +106,7 @@ func NewRanker(config *Config) (*Ranker, error) {
 }
 
 // AdjustBatchSize dynamically adjusts batch size to fit within token limits
-func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
+func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) error {
 	// Dynamically adjust batch size upfront.
 	for {
 		valid := true
@@ -141,11 +141,12 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 			break
 		}
 		if ranker.cfg.BatchSize <= MinBatchSize {
-			log.Fatal("Cannot create a valid batch within the token limit")
+			return fmt.Errorf("cannot create a valid batch within the token limit")
 		}
 		ranker.cfg.BatchSize--
 		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
 	}
+	return nil
 }
 
 type Object struct {
@@ -213,18 +214,18 @@ func LoadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 		if templateData[0] == '@' {
 			content, err := os.ReadFile(templateData[1:])
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to read template file %s: %w", templateData[1:], err)
 			}
 			templateData = string(content)
 		}
 		if tmpl, err = template.New("raink-item-template").Parse(templateData); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse template: %w", err)
 		}
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open input file %s: %w", filePath, err)
 	}
 	defer file.Close()
 
@@ -233,7 +234,7 @@ func LoadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 		// parse the file in an opaque array
 		var data []interface{}
 		if err := json.NewDecoder(file).Decode(&data); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to decode JSON from %s: %w", filePath, err)
 		}
 
 		// iterate over the map and create objects
@@ -242,14 +243,14 @@ func LoadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 			if tmpl != nil {
 				var tmplData bytes.Buffer
 				if err := tmpl.Execute(&tmplData, value); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("failed to execute template: %w", err)
 				}
 				valueStr = tmplData.String()
 			} else {
 				log.Printf("WARNING: using json input without a template, using JSON object as it is\n")
 				jsonValue, err := json.Marshal(value)
 				if err != nil {
-					return nil, err
+					return nil, fmt.Errorf("failed to marshal JSON value: %w", err)
 				}
 				valueStr = string(jsonValue)
 			}
@@ -266,14 +267,14 @@ func LoadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 				if err == io.EOF {
 					break
 				}
-				return nil, err
+				return nil, fmt.Errorf("failed to read line from %s: %w", filePath, err)
 			}
 			line = strings.TrimSpace(line)
 
 			if tmpl != nil {
 				var tmplData bytes.Buffer
 				if err := tmpl.Execute(&tmplData, map[string]string{"Data": line}); err != nil {
-					return nil, err
+					return nil, fmt.Errorf("failed to execute template on line: %w", err)
 				}
 				line = tmplData.String()
 			}
@@ -367,7 +368,11 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 
 	exposureCounts := make(map[string]int)
 
-	resultsChan := make(chan []RankedObject, r.numBatches)
+	type batchResult struct {
+		rankedObjects []RankedObject
+		err           error
+	}
+	resultsChan := make(chan batchResult, r.numBatches)
 
 	var firstRunRemainderItems []Object
 
@@ -409,15 +414,19 @@ func (r *Ranker) shuffleBatchRank(objects []Object) []FinalResult {
 		for j := 0; j < r.numBatches; j++ {
 			batch := objects[j*r.cfg.BatchSize : (j+1)*r.cfg.BatchSize]
 			go func(runNumber, batchNumber int, batch []Object) {
-				rankedBatch := r.rankObjects(batch, runNumber, batchNumber)
-				resultsChan <- rankedBatch
+				rankedBatch, err := r.rankObjects(batch, runNumber, batchNumber)
+				resultsChan <- batchResult{rankedObjects: rankedBatch, err: err}
 			}(i+1, j+1, batch)
 		}
 
 		// Collect results from all batches
 		for j := 0; j < r.numBatches; j++ {
-			rankedBatch := <-resultsChan
-			for _, rankedObject := range rankedBatch {
+			result := <-resultsChan
+			if result.err != nil {
+				log.Printf("Error in batch processing: %v", result.err)
+				continue // Skip this batch but continue with others
+			}
+			for _, rankedObject := range result.rankedObjects {
 				scores[rankedObject.Object.ID] = append(scores[rankedObject.Object.ID], rankedObject.Score)
 				exposureCounts[rankedObject.Object.ID]++ // Update exposure count
 			}
@@ -527,7 +536,7 @@ func (r *Ranker) estimateTokens(group []Object, includePrompt bool) int {
 	}
 }
 
-func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []RankedObject {
+func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) ([]RankedObject, error) {
 	prompt := r.cfg.InitialPrompt + promptDisclaimer
 	for _, obj := range group {
 		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
@@ -543,7 +552,7 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 				Score:  float64(i + 1), // Simulate scores based on position
 			})
 		}
-		return rankedObjects
+		return rankedObjects, nil
 	}
 
 	var rankedResponse RankedObjectResponse
@@ -551,10 +560,14 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 	for _, obj := range group {
 		inputIDs[obj.ID] = true
 	}
+	var err error
 	if r.cfg.OllamaModel != "" {
-		rankedResponse = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
+		rankedResponse, err = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
 	} else {
-		rankedResponse = r.callOpenAI(prompt, runNumber, batchNumber, inputIDs)
+		rankedResponse, err = r.callOpenAI(prompt, runNumber, batchNumber, inputIDs)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	// Assign scores based on position in the ranked list
@@ -571,7 +584,7 @@ func (r *Ranker) rankObjects(group []Object, runNumber int, batchNumber int) []R
 		}
 	}
 
-	return rankedObjects
+	return rankedObjects, nil
 }
 
 type CustomTransport struct {
@@ -637,7 +650,7 @@ func validateIDs(rankedResponse *RankedObjectResponse, inputIDs map[string]bool)
 	}
 }
 
-func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs map[string]bool) RankedObjectResponse {
+func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs map[string]bool) (RankedObjectResponse, error) {
 
 	customTransport := &CustomTransport{Transport: http.DefaultTransport}
 	customClient := &http.Client{Transport: customTransport}
@@ -714,7 +727,7 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 				continue
 			}
 
-			return rankedResponse
+			return rankedResponse, nil
 		}
 
 		if err == context.DeadlineExceeded {
@@ -757,12 +770,12 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 				backoff *= 2
 			}
 		} else {
-			log.Fatalf("Run %*d/%d, Batch %*d/%d: Unexpected error: %v", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
+			return RankedObjectResponse{}, fmt.Errorf("run %*d/%d, batch %*d/%d: unexpected error: %v", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
 		}
 	}
 }
 
-func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs map[string]bool) RankedObjectResponse {
+func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs map[string]bool) (RankedObjectResponse, error) {
 
 	var rankedResponse RankedObjectResponse
 
@@ -781,12 +794,12 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 			"messages": conversationHistory,
 		})
 		if err != nil {
-			log.Fatalf("Error creating Ollama API request body: %v", err)
+			return RankedObjectResponse{}, fmt.Errorf("error creating Ollama API request body: %v", err)
 		}
 
 		req, err := http.NewRequest("POST", r.cfg.OllamaAPIURL, bytes.NewReader(requestBody))
 		if err != nil {
-			log.Fatalf("Error creating Ollama API request: %v", err)
+			return RankedObjectResponse{}, fmt.Errorf("error creating Ollama API request: %v", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 
@@ -794,18 +807,18 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Fatalf("Error making request to Ollama API: %v", err)
+			return RankedObjectResponse{}, fmt.Errorf("error making request to Ollama API: %v", err)
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
-			log.Fatalf("Ollama API returned an error: %v, body: %s", resp.StatusCode, body)
+			return RankedObjectResponse{}, fmt.Errorf("Ollama API returned an error: %v, body: %s", resp.StatusCode, body)
 		}
 
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Fatalf("Error reading Ollama API response body: %v", err)
+			return RankedObjectResponse{}, fmt.Errorf("error reading Ollama API response body: %v", err)
 		}
 
 		var ollamaResponse struct {
@@ -816,7 +829,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		err = json.Unmarshal(responseBody, &ollamaResponse)
 		if err != nil {
-			log.Fatalf("Error parsing Ollama API response: %v", err)
+			return RankedObjectResponse{}, fmt.Errorf("error parsing Ollama API response: %v", err)
 		}
 
 		conversationHistory = append(
@@ -855,6 +868,6 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 			continue
 		}
 
-		return rankedResponse
+		return rankedResponse, nil
 	}
 }
