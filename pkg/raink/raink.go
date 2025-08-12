@@ -1,4 +1,4 @@
-package main
+package raink
 
 import (
 	"bufio"
@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -28,8 +27,8 @@ import (
 )
 
 const (
-	idLen        = 8
-	minBatchSize = 2
+	IDLen        = 8
+	MinBatchSize = 2
 )
 
 /*
@@ -57,7 +56,7 @@ type Config struct {
 	DryRun          bool             `json:"-"`
 }
 
-// TODO: Move all CLI flag validation this func instead.
+// Validate validates the configuration
 func (c *Config) Validate() error {
 	if c.InitialPrompt == "" {
 		return fmt.Errorf("initial prompt cannot be empty")
@@ -74,8 +73,8 @@ func (c *Config) Validate() error {
 	if c.OllamaModel == "" && c.OpenAIAPIURL == "" && c.OpenAIKey == "" {
 		return fmt.Errorf("openai key cannot be empty")
 	}
-	if c.BatchSize < minBatchSize {
-		return fmt.Errorf("batch size must be at least %d", minBatchSize)
+	if c.BatchSize < MinBatchSize {
+		return fmt.Errorf("batch size must be at least %d", MinBatchSize)
 	}
 	return nil
 }
@@ -88,6 +87,7 @@ type Ranker struct {
 	round      int
 }
 
+// NewRanker creates a new Ranker instance
 func NewRanker(config *Config) (*Ranker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
@@ -105,6 +105,7 @@ func NewRanker(config *Config) (*Ranker, error) {
 	}, nil
 }
 
+// AdjustBatchSize dynamically adjusts batch size to fit within token limits
 func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 	// Dynamically adjust batch size upfront.
 	for {
@@ -139,7 +140,7 @@ func (ranker *Ranker) AdjustBatchSize(objects []Object, samples int) {
 			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.TokenLimit)
 			break
 		}
-		if ranker.cfg.BatchSize <= minBatchSize {
+		if ranker.cfg.BatchSize <= MinBatchSize {
 			log.Fatal("Cannot create a valid batch within the token limit")
 		}
 		ranker.cfg.BatchSize--
@@ -187,6 +188,7 @@ func GenerateSchema[T any]() interface{} {
 
 var RankedObjectResponseSchema = GenerateSchema[RankedObjectResponse]()
 
+// ShortDeterministicID generates a short deterministic ID from input string
 func ShortDeterministicID(input string, length int) string {
 	// Keep only A-Za-z0-9 from Base64-encoded SHA-256 hash.
 	hash := sha256.Sum256([]byte(input))
@@ -204,7 +206,8 @@ func ShortDeterministicID(input string, length int) string {
 	return filtered[:length]
 }
 
-func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []Object, err error) {
+// LoadObjectsFromFile loads objects from a file with optional template
+func LoadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []Object, err error) {
 	var tmpl *template.Template
 	if templateData != "" {
 		if templateData[0] == '@' {
@@ -251,7 +254,7 @@ func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 				valueStr = string(jsonValue)
 			}
 
-			id := ShortDeterministicID(valueStr, idLen)
+			id := ShortDeterministicID(valueStr, IDLen)
 			objects = append(objects, Object{ID: id, Object: value, Value: valueStr})
 		}
 	} else {
@@ -275,7 +278,7 @@ func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 				line = tmplData.String()
 			}
 
-			id := ShortDeterministicID(line, idLen)
+			id := ShortDeterministicID(line, IDLen)
 			objects = append(objects, Object{ID: id, Object: nil, Value: line})
 		}
 	}
@@ -283,126 +286,7 @@ func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 	return objects, nil
 }
 
-// TODO: Move all of this CLI-related code to a separate package.
-func main() {
-	log.SetOutput(os.Stderr)
-
-	inputFile := flag.String("f", "", "Input file")
-	forceJSON := flag.Bool("json", false, "Force JSON parsing regardless of file extension")
-	inputTemplate := flag.String("template", "{{.Data}}", "Template for each object in the input file (prefix with @ to use a file)")
-	batchSize := flag.Int("s", 10, "Number of items per batch")
-	numRuns := flag.Int("r", 10, "Number of runs")
-	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
-	initialPrompt := flag.String("p", "", "Initial prompt (prefix with @ to use a file)")
-	outputFile := flag.String("o", "", "JSON output file")
-
-	ollamaURL := flag.String("ollama-url", "http://localhost:11434/api/chat", "Ollama API URL")
-	ollamaModel := flag.String("ollama-model", "", "Ollama model name (if not set, OpenAI will be used)")
-	oaiModel := flag.String("openai-model", openai.ChatModelGPT4oMini, "OpenAI model name")
-	oaiURL := flag.String("openai-url", "", "OpenAI API base URL (e.g., for OpenAI-compatible API like vLLM)")
-	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
-
-	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
-	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
-	flag.Parse()
-
-	// TODO: This should be a more resilient check. We're assuming that if the
-	// batchTokens is 128000, then a user didn't pass that value via CLI (i.e.,
-	// that it's the default value).
-	if *ollamaModel != "" && *batchTokens == 128000 {
-		*batchTokens = 4096
-	}
-
-	// This "threshold" is a way to add some padding to our estimation of
-	// average token usage per batch. We're effectively leaving 5% of
-	// wiggle room.
-	var tokenLimitThreshold = int(0.95 * float64(*batchTokens))
-
-	if *inputFile == "" {
-		log.Println("Usage: raink -f <input_file> [-s <batch_size>] [-r <num_runs>] [-p <initial_prompt>] [-t <batch_tokens>] [-ollama-model <model_name>] [-openai-model <model_name>] [-openai-url <base_url>] [-ratio <refinement_ratio>]")
-		return
-	}
-
-	if *refinementRatio < 0 || *refinementRatio >= 1 {
-		fmt.Println("Error: Refinement ratio must be >= 0 and < 1")
-		os.Exit(1)
-	}
-
-	userPrompt := *initialPrompt
-	if strings.HasPrefix(userPrompt, "@") {
-		filePath := strings.TrimPrefix(userPrompt, "@")
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			log.Fatalf("Error reading initial prompt file: %v", err)
-		}
-		userPrompt = string(content)
-	}
-
-	config := &Config{
-		InitialPrompt:   userPrompt,
-		BatchSize:       *batchSize,
-		NumRuns:         *numRuns,
-		OllamaModel:     *ollamaModel,
-		OpenAIModel:     *oaiModel,
-		TokenLimit:      tokenLimitThreshold,
-		RefinementRatio: *refinementRatio,
-		OpenAIKey:       os.Getenv("OPENAI_API_KEY"),
-		OpenAIAPIURL:    *oaiURL,
-		OllamaAPIURL:    *ollamaURL,
-		Encoding:        *encoding,
-		BatchTokens:     *batchTokens,
-		DryRun:          *dryRun,
-	}
-
-	ranker, err := NewRanker(config)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	objects, err := loadObjectsFromFile(*inputFile, *inputTemplate, *forceJSON)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// check that no object is too large
-	for _, obj := range objects {
-		tokens := ranker.estimateTokens([]Object{obj}, true)
-		if tokens > *batchTokens {
-			log.Fatalf("Object is too large with %d tokens:\n%s", tokens, obj.Value)
-		}
-	}
-
-	// Dynamically adjust batch size upfront.
-	ranker.AdjustBatchSize(objects, 10)
-
-	// Recursive processing
-	finalResults := ranker.Rank(objects, 1)
-
-	// Add the rank key to each final result based on its position in the list
-	for i := range finalResults {
-		finalResults[i].Rank = i + 1
-	}
-
-	jsonResults, err := json.MarshalIndent(finalResults, "", "  ")
-	if err != nil {
-		panic(err)
-	}
-
-	if !config.DryRun {
-		fmt.Println(string(jsonResults))
-	}
-
-	if *outputFile != "" {
-		os.WriteFile(*outputFile, jsonResults, 0644)
-		log.Printf("Results written to %s\n", *outputFile)
-	}
-}
-
-// TODO: The final exposure value should be the sum of all exposures from all
-// refinement rounds (not just the last one). This isn't crucial since exposure
-// is just a helpful metric to show that objects compared to a sufficiently
-// large number of other objects.
-
+// Rank performs the ranking algorithm on the given objects
 func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	r.round = round
 
@@ -473,7 +357,6 @@ func (r *Ranker) Rank(objects []Object, round int) []FinalResult {
 	return finalResults
 }
 
-// TODO: Also log the request/retry attempt number.
 func (r *Ranker) logFromApiCall(runNum, batchNum int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Round %d, Run %*d/%d, Batch %*d/%d: "+message, r.round, len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches)
 	log.Printf(formattedMessage, args...)
@@ -598,8 +481,6 @@ func (r *Ranker) logTokenSizes(group []Object) {
 
 const promptFmt = "id: `%s`\nvalue:\n```\n%s\n```\n\n"
 
-// TODO: Merge these and clean them up.
-
 var promptDisclaimer = fmt.Sprintf(
 	"\n\nREMEMBER to:\n"+
 		"- ALWAYS respond with the short %d-character ID of each item found above the value "+
@@ -610,7 +491,7 @@ var promptDisclaimer = fmt.Sprintf(
 		"- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT\n"+
 		"- Respond in JSON format, with the following schema:\n  {\"objects\": [\"<ID1>\", \"<ID2>\", ...]}\n\n"+
 		"Here are the objects to be ranked:\n\n",
-	idLen,
+	IDLen,
 )
 
 const missingIDsStr = "Your last response was missing the following IDs: [%s]. " +
@@ -622,6 +503,11 @@ const missingIDsStr = "Your last response was missing the following IDs: [%s]. "
 	"— NEVER include scores or a written reason/justification in your response!"
 
 const invalidJSONStr = "Your last response was not valid JSON. Try again!"
+
+// EstimateTokens estimates the number of tokens for a group of objects
+func (r *Ranker) EstimateTokens(group []Object, includePrompt bool) int {
+	return r.estimateTokens(group, includePrompt)
+}
 
 func (r *Ranker) estimateTokens(group []Object, includePrompt bool) int {
 	text := ""
@@ -714,12 +600,8 @@ func (t *CustomTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// Updates the rankedResponse in place to fix case-insensitive ID mismatches.
+// validateIDs updates the rankedResponse in place to fix case-insensitive ID mismatches.
 // If any IDs are missing, returns the missing IDs along with an error.
-// TODO: Also error on IDs in rankedResponse that are not in inputIDs. For example:
-// Run  1/10, Batch  8/10: Missing IDs: [VkCMOyV9]
-// Ollama API response: {"objects": ["5reULTRv", "KTJsPKHz", "eBFIaWo7", "AhqhnGsE", "Ug_hOxYp", "bWfMDUnE", "4sSg4Ojz", "VkJMOyV9", "UJ1-iMmW", "v6Puwf8K"]}
-
 func validateIDs(rankedResponse *RankedObjectResponse, inputIDs map[string]bool) ([]string, error) {
 	// Create a map for case-insensitive ID matching
 	inputIDsLower := make(map[string]string)

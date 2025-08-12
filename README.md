@@ -22,9 +22,7 @@ We built raink to circumvent those issues and solve general ranking problems tha
 ### Install
 
 ```
-git clone https://github.com/noperator/raink
-cd raink
-go install
+go install github.com/noperator/raink/cmd/raink@latest
 ```
 
 ### Configure
@@ -178,7 +176,7 @@ raink \
 - [x] add blog link
 - [x] support non-OpenAI models
 - [ ] add ~boolean~ refinement ratio flag
-- [ ] separate package and cli tool
+- [x] separate package and cli tool
 - [ ] add python bindings?
 - [ ] clarify when prompt included in token estimate
 - [ ] remove token limit threshold? potentially confusing/unnecessary
