@@ -54,6 +54,7 @@ type Config struct {
 	Encoding        string           `json:"encoding"`
 	BatchTokens     int              `json:"batch_tokens"`
 	DryRun          bool             `json:"-"`
+	Logger          *log.Logger      `json:"-"`
 }
 
 // Validate validates the configuration
@@ -93,6 +94,11 @@ func NewRanker(config *Config) (*Ranker, error) {
 		return nil, err
 	}
 
+	// Initialize default logger if not provided
+	if config.Logger == nil {
+		config.Logger = log.New(os.Stderr, "[raink] ", log.LstdFlags)
+	}
+
 	encoding, err := tiktoken.GetEncoding(config.Encoding)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tiktoken encoding: %w", err)
@@ -123,7 +129,7 @@ func (ranker *Ranker) adjustBatchSize(objects []object, samples int) error {
 				estBatchTokens := ranker.estimateTokens(batch, true)
 				estTotalTokens += estBatchTokens
 				if estBatchTokens > ranker.cfg.TokenLimit {
-					log.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
+					ranker.cfg.Logger.Printf("Sample %d: estimated tokens %d > max token threshold %d", i, estBatchTokens, ranker.cfg.TokenLimit)
 					ranker.logTokenSizes(batch)
 					valid = false
 					break
@@ -137,14 +143,14 @@ func (ranker *Ranker) adjustBatchSize(objects []object, samples int) error {
 		if valid {
 			avgEstTokens := estTotalTokens / (samples * numBatches)
 			avgEstPct := float64(avgEstTokens) / float64(ranker.cfg.TokenLimit) * 100
-			log.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.TokenLimit)
+			ranker.cfg.Logger.Printf("Average estimated tokens: %d (%.2f%% of max %d tokens)", avgEstTokens, avgEstPct, ranker.cfg.TokenLimit)
 			break
 		}
 		if ranker.cfg.BatchSize <= minBatchSize {
 			return fmt.Errorf("cannot create a valid batch within the token limit")
 		}
 		ranker.cfg.BatchSize--
-		log.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
+		ranker.cfg.Logger.Printf("Decreasing batch size to %d", ranker.cfg.BatchSize)
 	}
 	return nil
 }
@@ -209,7 +215,7 @@ func shortDeterministicID(input string, length int) string {
 
 // RankFromFile ranks objects loaded from a file with optional template
 func (r *Ranker) RankFromFile(filePath string, templateData string, forceJSON bool) ([]RankedObject, error) {
-	objects, err := loadObjectsFromFile(filePath, templateData, forceJSON)
+	objects, err := r.loadObjectsFromFile(filePath, templateData, forceJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +243,7 @@ func (r *Ranker) RankFromFile(filePath string, templateData string, forceJSON bo
 }
 
 // loadObjectsFromFile loads objects from a file with optional template
-func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []object, err error) {
+func (r *Ranker) loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (objects []object, err error) {
 	var tmpl *template.Template
 	if templateData != "" {
 		if templateData[0] == '@' {
@@ -276,7 +282,7 @@ func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 				}
 				valueStr = tmplData.String()
 			} else {
-				log.Printf("WARNING: using json input without a template, using JSON object as it is\n")
+				r.cfg.Logger.Printf("WARNING: using json input without a template, using JSON object as it is\n")
 				jsonValue, err := json.Marshal(value)
 				if err != nil {
 					return nil, fmt.Errorf("failed to marshal JSON value: %w", err)
@@ -320,7 +326,7 @@ func loadObjectsFromFile(filePath string, templateData string, forceJSON bool) (
 func (r *Ranker) rank(objects []object, round int) []RankedObject {
 	r.round = round
 
-	log.Printf("Round %d: Ranking %d objects\n", r.round, len(objects))
+	r.cfg.Logger.Printf("Round %d: Ranking %d objects\n", r.round, len(objects))
 
 	// If we've narrowed down to a single object, we're done.
 	if len(objects) == 1 {
@@ -363,9 +369,9 @@ func (r *Ranker) rank(objects []object, round int) []RankedObject {
 		return results
 	}
 
-	log.Println("Top items being sent back into recursion:")
+	r.cfg.Logger.Println("Top items being sent back into recursion:")
 	for i, obj := range topPortion {
-		log.Printf("Rank %d: ID=%s, Score=%.2f, Value=%s", i+1, obj.Key, obj.Score, obj.Value)
+		r.cfg.Logger.Printf("Rank %d: ID=%s, Score=%.2f, Value=%s", i+1, obj.Key, obj.Score, obj.Value)
 	}
 
 	var topPortionObjects []object
@@ -389,7 +395,7 @@ func (r *Ranker) rank(objects []object, round int) []RankedObject {
 
 func (r *Ranker) logFromApiCall(runNum, batchNum int, message string, args ...interface{}) {
 	formattedMessage := fmt.Sprintf("Round %d, Run %*d/%d, Batch %*d/%d: "+message, r.round, len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches)
-	log.Printf(formattedMessage, args...)
+	r.cfg.Logger.Printf(formattedMessage, args...)
 }
 
 func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
@@ -420,7 +426,7 @@ func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
 				for _, item := range remainderItems {
 					for _, firstRunItem := range firstRunRemainderItems {
 						if item.ID == firstRunItem.ID {
-							log.Printf("Conflicting remainder item found: %v, %v\n", item, firstRunItem)
+							r.cfg.Logger.Printf("Conflicting remainder item found: %v, %v\n", item, firstRunItem)
 							conflictFound = true
 							break
 						}
@@ -439,7 +445,7 @@ func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
 		}
 
 		// Split into groups of batchSize and process them concurrently
-		log.Printf("Round %d, Run %*d/%d: Submitting batches to API\n", r.round, len(strconv.Itoa(r.cfg.NumRuns)), i+1, r.cfg.NumRuns)
+		r.cfg.Logger.Printf("Round %d, Run %*d/%d: Submitting batches to API\n", r.round, len(strconv.Itoa(r.cfg.NumRuns)), i+1, r.cfg.NumRuns)
 		for j := 0; j < r.numBatches; j++ {
 			batch := objects[j*r.cfg.BatchSize : (j+1)*r.cfg.BatchSize]
 			go func(runNumber, batchNumber int, batch []object) {
@@ -452,7 +458,7 @@ func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
 		for j := 0; j < r.numBatches; j++ {
 			result := <-resultsChan
 			if result.err != nil {
-				log.Printf("Error in batch processing: %v", result.err)
+				r.cfg.Logger.Printf("Error in batch processing: %v", result.err)
 				continue // Skip this batch but continue with others
 			}
 			for _, rankedObject := range result.rankedObjects {
@@ -467,7 +473,7 @@ func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
 			if remainderStart < len(objects) {
 				firstRunRemainderItems = make([]object, len(objects[remainderStart:]))
 				copy(firstRunRemainderItems, objects[remainderStart:])
-				log.Printf("First run remainder items: %v\n", firstRunRemainderItems)
+				r.cfg.Logger.Printf("First run remainder items: %v\n", firstRunRemainderItems)
 			}
 		}
 	}
@@ -506,14 +512,14 @@ func (r *Ranker) shuffleBatchRank(objects []object) []RankedObject {
 }
 
 func (r *Ranker) logTokenSizes(group []object) {
-	log.Println("Logging token sizes for each object in the batch:")
+	r.cfg.Logger.Println("Logging token sizes for each object in the batch:")
 	for _, obj := range group {
 		tokenSize := r.estimateTokens([]object{obj}, false)
 		valuePreview := obj.Value
 		if len(valuePreview) > 100 {
 			valuePreview = valuePreview[:100]
 		}
-		log.Printf("Object ID: %s, Token Size: %d, Value Preview: %s", obj.ID, tokenSize, valuePreview)
+		r.cfg.Logger.Printf("Object ID: %s, Token Size: %d, Value Preview: %s", obj.ID, tokenSize, valuePreview)
 	}
 }
 
@@ -567,7 +573,7 @@ func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]
 	}
 
 	if r.cfg.DryRun {
-		log.Printf("Dry run API call")
+		r.cfg.Logger.Printf("Dry run API call")
 		// Simulate a ranked response for dry run
 		var rankedObjects []rankedObject
 		for i, obj := range group {
@@ -736,7 +742,7 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 					openai.UserMessage(invalidJSONStr),
 				)
 				trimmedContent := strings.TrimSpace(completion.Choices[0].Message.Content)
-				log.Printf("OpenAI API response: %s", trimmedContent)
+				r.cfg.Logger.Printf("OpenAI API response: %s", trimmedContent)
 				continue
 			}
 
@@ -747,7 +753,7 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "))),
 				)
 				trimmedContent := strings.TrimSpace(completion.Choices[0].Message.Content)
-				log.Printf("OpenAI API response: %s", trimmedContent)
+				r.cfg.Logger.Printf("OpenAI API response: %s", trimmedContent)
 				continue
 			}
 
@@ -874,7 +880,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 				},
 			)
 			trimmedContent := strings.TrimSpace(ollamaResponse.Message.Content)
-			log.Printf("Ollama API response: %s", trimmedContent)
+			r.cfg.Logger.Printf("Ollama API response: %s", trimmedContent)
 			continue
 		}
 
@@ -888,7 +894,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 				},
 			)
 			trimmedContent := strings.TrimSpace(ollamaResponse.Message.Content)
-			log.Printf("Ollama API response: %s", trimmedContent)
+			r.cfg.Logger.Printf("Ollama API response: %s", trimmedContent)
 			continue
 		}
 
