@@ -794,7 +794,7 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 				backoff *= 2
 			}
 		} else {
-			return rankedObjectResponse{}, fmt.Errorf("run %*d/%d, batch %*d/%d: unexpected error: %v", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
+			return rankedObjectResponse{}, fmt.Errorf("run %*d/%d, batch %*d/%d: unexpected error: %w", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
 		}
 	}
 }
@@ -818,12 +818,12 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 			"messages": conversationHistory,
 		})
 		if err != nil {
-			return rankedObjectResponse{}, fmt.Errorf("error creating Ollama API request body: %v", err)
+			return rankedObjectResponse{}, fmt.Errorf("error creating Ollama API request body: %w", err)
 		}
 
 		req, err := http.NewRequest("POST", r.cfg.OllamaAPIURL, bytes.NewReader(requestBody))
 		if err != nil {
-			return rankedObjectResponse{}, fmt.Errorf("error creating Ollama API request: %v", err)
+			return rankedObjectResponse{}, fmt.Errorf("error creating Ollama API request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 
@@ -831,7 +831,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return rankedObjectResponse{}, fmt.Errorf("error making request to Ollama API: %v", err)
+			return rankedObjectResponse{}, fmt.Errorf("error making request to Ollama API: %w", err)
 		}
 		defer resp.Body.Close()
 
@@ -842,7 +842,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return rankedObjectResponse{}, fmt.Errorf("error reading Ollama API response body: %v", err)
+			return rankedObjectResponse{}, fmt.Errorf("error reading Ollama API response body: %w", err)
 		}
 
 		var ollamaResponse struct {
@@ -853,7 +853,7 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		err = json.Unmarshal(responseBody, &ollamaResponse)
 		if err != nil {
-			return rankedObjectResponse{}, fmt.Errorf("error parsing Ollama API response: %v", err)
+			return rankedObjectResponse{}, fmt.Errorf("error parsing Ollama API response: %w", err)
 		}
 
 		conversationHistory = append(
