@@ -4,7 +4,7 @@ go 1.23.4
 
 require (
 	github.com/invopop/jsonschema v0.12.0
-	github.com/openai/openai-go v0.1.0-alpha.38
+	github.com/openai/openai-go v1.12.0
 	github.com/pkoukk/tiktoken-go v0.1.7
 )
 

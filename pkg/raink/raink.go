@@ -23,6 +23,7 @@ import (
 	"github.com/invopop/jsonschema"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 	"github.com/pkoukk/tiktoken-go"
 )
 
@@ -711,19 +712,18 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 		defer cancel()
 
 		completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-			Messages: openai.F(conversationHistory),
-			ResponseFormat: openai.F[openai.ChatCompletionNewParamsResponseFormatUnion](
-				openai.ResponseFormatJSONSchemaParam{
-					Type: openai.F(openai.ResponseFormatJSONSchemaTypeJSONSchema),
-					JSONSchema: openai.F(openai.ResponseFormatJSONSchemaJSONSchemaParam{
-						Name:        openai.F("ranked_object_response"),
-						Description: openai.F("List of ranked object IDs"),
-						Schema:      openai.F(rankedObjectResponseSchema),
+			Messages: conversationHistory,
+			ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+				OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+					JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
+						Name:        "ranked_object_response",
+						Description: openai.String("List of ranked object IDs"),
+						Schema:      rankedObjectResponseSchema,
 						Strict:      openai.Bool(true),
-					}),
+					},
 				},
-			),
-			Model: openai.F(r.cfg.OpenAIModel),
+			},
+			Model: r.cfg.OpenAIModel,
 		})
 		if err == nil {
 
