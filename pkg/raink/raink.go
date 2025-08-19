@@ -194,7 +194,9 @@ func generateSchema[T any]() interface{} {
 
 var rankedObjectResponseSchema = generateSchema[rankedObjectResponse]()
 
-func shortDeterministicID(input string, length int) string {
+// ShortDeterministicID generates a deterministic ID of specified length from input string.
+// It uses SHA-256 hash and Base64 encoding, keeping only alphanumeric characters.
+func ShortDeterministicID(input string, length int) string {
 	// Keep only A-Za-z0-9 from Base64-encoded SHA-256 hash.
 	hash := sha256.Sum256([]byte(input))
 	base64Encoded := base64.URLEncoding.EncodeToString(hash[:])
@@ -287,7 +289,7 @@ func (r *Ranker) loadObjectsFromFile(filePath string, templateData string, force
 				valueStr = string(jsonValue)
 			}
 
-			id := shortDeterministicID(valueStr, idLen)
+			id := ShortDeterministicID(valueStr, idLen)
 			objects = append(objects, object{ID: id, Object: value, Value: valueStr})
 		}
 	} else {
@@ -311,7 +313,7 @@ func (r *Ranker) loadObjectsFromFile(filePath string, templateData string, force
 				line = tmplData.String()
 			}
 
-			id := shortDeterministicID(line, idLen)
+			id := ShortDeterministicID(line, idLen)
 			objects = append(objects, object{ID: id, Object: nil, Value: line})
 		}
 	}
