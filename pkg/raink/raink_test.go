@@ -181,11 +181,14 @@ func TestRankFromFile_WithSentencesData(t *testing.T) {
 		DryRun:          true, // Use dry run to avoid actual API calls
 	}
 
-	// Allow overriding with actual API base URL for integration testing
-	if apiBase := os.Getenv("OPENAI_API_BASE"); apiBase != "" && os.Getenv("OPENAI_API_KEY") != "" {
-		config.OpenAIAPIURL = apiBase
-		config.OpenAIKey = os.Getenv("OPENAI_API_KEY")
+	// Allow integration testing with real OpenAI API if API key is provided
+	if apiKey := os.Getenv("OPENAI_API_KEY"); apiKey != "" {
+		config.OpenAIKey = apiKey
 		config.DryRun = false
+		// Optionally override the base URL (defaults to OpenAI's standard URL)
+		if apiBase := os.Getenv("OPENAI_API_BASE"); apiBase != "" {
+			config.OpenAIAPIURL = apiBase
+		}
 	}
 
 	ranker, err := NewRanker(config)

@@ -23,6 +23,7 @@ import (
 	"github.com/invopop/jsonschema"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/shared"
 	"github.com/pkoukk/tiktoken-go"
 )
 
@@ -193,7 +194,9 @@ func generateSchema[T any]() interface{} {
 
 var rankedObjectResponseSchema = generateSchema[rankedObjectResponse]()
 
-func shortDeterministicID(input string, length int) string {
+// ShortDeterministicID generates a deterministic ID of specified length from input string.
+// It uses SHA-256 hash and Base64 encoding, keeping only alphanumeric characters.
+func ShortDeterministicID(input string, length int) string {
 	// Keep only A-Za-z0-9 from Base64-encoded SHA-256 hash.
 	hash := sha256.Sum256([]byte(input))
 	base64Encoded := base64.URLEncoding.EncodeToString(hash[:])
@@ -286,7 +289,7 @@ func (r *Ranker) loadObjectsFromFile(filePath string, templateData string, force
 				valueStr = string(jsonValue)
 			}
 
-			id := shortDeterministicID(valueStr, idLen)
+			id := ShortDeterministicID(valueStr, idLen)
 			objects = append(objects, object{ID: id, Object: value, Value: valueStr})
 		}
 	} else {
@@ -310,7 +313,7 @@ func (r *Ranker) loadObjectsFromFile(filePath string, templateData string, force
 				line = tmplData.String()
 			}
 
-			id := shortDeterministicID(line, idLen)
+			id := ShortDeterministicID(line, idLen)
 			objects = append(objects, object{ID: id, Object: nil, Value: line})
 		}
 	}
@@ -711,19 +714,18 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 		defer cancel()
 
 		completion, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-			Messages: openai.F(conversationHistory),
-			ResponseFormat: openai.F[openai.ChatCompletionNewParamsResponseFormatUnion](
-				openai.ResponseFormatJSONSchemaParam{
-					Type: openai.F(openai.ResponseFormatJSONSchemaTypeJSONSchema),
-					JSONSchema: openai.F(openai.ResponseFormatJSONSchemaJSONSchemaParam{
-						Name:        openai.F("ranked_object_response"),
-						Description: openai.F("List of ranked object IDs"),
-						Schema:      openai.F(rankedObjectResponseSchema),
+			Messages: conversationHistory,
+			ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+				OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+					JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
+						Name:        "ranked_object_response",
+						Description: openai.String("List of ranked object IDs"),
+						Schema:      rankedObjectResponseSchema,
 						Strict:      openai.Bool(true),
-					}),
+					},
 				},
-			),
-			Model: openai.F(r.cfg.OpenAIModel),
+			},
+			Model: r.cfg.OpenAIModel,
 		})
 		if err == nil {
 
