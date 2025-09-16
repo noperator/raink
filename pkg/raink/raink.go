@@ -443,6 +443,13 @@ func (r *Ranker) rank(objects []object, round int) []RankedObject {
 
 	// Calculate the mid index based on the refinement ratio.
 	mid := int(float64(len(results)) * r.cfg.RefinementRatio)
+
+	// Ensure we have at least 2 objects for meaningful ranking
+	// (you need at least 2 items to rank against each other)
+	if mid < 2 {
+		return results
+	}
+
 	topPortion := results[:mid]
 	bottomPortion := results[mid:]
 
