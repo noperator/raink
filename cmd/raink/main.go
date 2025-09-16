@@ -17,7 +17,7 @@ func main() {
 	forceJSON := flag.Bool("json", false, "Force JSON parsing regardless of file extension")
 	inputTemplate := flag.String("template", "{{.Data}}", "Template for each object in the input file (prefix with @ to use a file)")
 	batchSize := flag.Int("s", 10, "Number of items per batch")
-	numRuns := flag.Int("r", 10, "Number of runs")
+	numRuns := flag.Int("r", 3, "Number of runs")
 	batchTokens := flag.Int("t", 128000, "Max tokens per batch")
 	initialPrompt := flag.String("p", "", "Initial prompt (prefix with @ to use a file)")
 	outputFile := flag.String("o", "", "JSON output file")
@@ -29,7 +29,7 @@ func main() {
 	encoding := flag.String("encoding", "o200k_base", "Tokenizer encoding")
 
 	dryRun := flag.Bool("dry-run", false, "Enable dry run mode (log API calls without making them)")
-	refinementRatio := flag.Float64("ratio", 0.5, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
+	refinementRatio := flag.Float64("ratio", 0.1, "Refinement ratio as a decimal (e.g., 0.5 for 50%)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
