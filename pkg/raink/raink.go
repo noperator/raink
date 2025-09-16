@@ -647,28 +647,6 @@ func (r *Ranker) estimateTokens(group []object, includePrompt bool) int {
 }
 
 func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]rankedObject, error) {
-	// Try to create memorable ID mappings
-	originalToTemp, tempToOriginal, err := createIDMappings(group, r.rng, r.cfg.Logger)
-	useMemorableIDs := err == nil && originalToTemp != nil && tempToOriginal != nil
-
-	prompt := r.cfg.InitialPrompt + promptDisclaimer
-	inputIDs := make(map[string]bool)
-
-	if useMemorableIDs {
-		// Use memorable IDs in the prompt
-		for _, obj := range group {
-			tempID := originalToTemp[obj.ID]
-			prompt += fmt.Sprintf(promptFmt, tempID, obj.Value)
-			inputIDs[tempID] = true
-		}
-	} else {
-		// Fall back to original IDs
-		for _, obj := range group {
-			prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
-			inputIDs[obj.ID] = true
-		}
-	}
-
 	if r.cfg.DryRun {
 		r.cfg.Logger.Debug("Dry run API call")
 		// Simulate a ranked response for dry run
@@ -682,36 +660,88 @@ func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]
 		return rankedObjects, nil
 	}
 
-	var rankedResponse rankedObjectResponse
-	if r.cfg.OllamaModel != "" {
-		rankedResponse, err = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
-	} else {
-		rankedResponse, err = r.callOpenAI(prompt, runNumber, batchNumber, inputIDs)
-	}
-	if err != nil {
-		return nil, err
-	}
+	maxRetries := 10
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Try to create memorable ID mappings for each attempt
+		originalToTemp, tempToOriginal, err := createIDMappings(group, r.rng, r.cfg.Logger)
+		useMemorableIDs := err == nil && originalToTemp != nil && tempToOriginal != nil
 
-	// Translate temporary IDs back to original IDs if using memorable IDs
-	if useMemorableIDs {
-		translateIDsInResponse(&rankedResponse, tempToOriginal)
-	}
+		prompt := r.cfg.InitialPrompt + promptDisclaimer
+		inputIDs := make(map[string]bool)
 
-	// Assign scores based on position in the ranked list
-	var rankedObjects []rankedObject
-	for i, id := range rankedResponse.Objects {
-		for _, obj := range group {
-			if obj.ID == id {
-				rankedObjects = append(rankedObjects, rankedObject{
-					Object: obj,
-					Score:  float64(i + 1), // Score based on position (1 for first, 2 for second, etc.)
-				})
-				break
+		if useMemorableIDs {
+			// Use memorable IDs in the prompt
+			for _, obj := range group {
+				tempID := originalToTemp[obj.ID]
+				prompt += fmt.Sprintf(promptFmt, tempID, obj.Value)
+				inputIDs[tempID] = true
+			}
+		} else {
+			// Fall back to original IDs
+			for _, obj := range group {
+				prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+				inputIDs[obj.ID] = true
 			}
 		}
+
+		var rankedResponse rankedObjectResponse
+		if r.cfg.OllamaModel != "" {
+			rankedResponse, err = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
+		} else {
+			rankedResponse, err = r.callOpenAI(prompt, runNumber, batchNumber, inputIDs)
+		}
+		if err != nil {
+			if attempt == maxRetries-1 {
+				return nil, err
+			}
+			r.logFromApiCall(runNumber, batchNumber, "API call failed, retrying with new memorable IDs (attempt %d): %v", attempt+1, err)
+			continue
+		}
+
+		// Translate temporary IDs back to original IDs if using memorable IDs
+		if useMemorableIDs {
+			translateIDsInResponse(&rankedResponse, tempToOriginal)
+		}
+
+		// Check if we got all expected IDs
+		expectedIDs := make(map[string]bool)
+		for _, obj := range group {
+			expectedIDs[obj.ID] = true
+		}
+		for _, id := range rankedResponse.Objects {
+			delete(expectedIDs, id)
+		}
+
+		if len(expectedIDs) > 0 {
+			var missingIDs []string
+			for id := range expectedIDs {
+				missingIDs = append(missingIDs, id)
+			}
+			if attempt == maxRetries-1 {
+				return nil, fmt.Errorf("missing IDs after %d attempts: %v", maxRetries, missingIDs)
+			}
+			r.logFromApiCall(runNumber, batchNumber, "Missing IDs, retrying with new memorable IDs (attempt %d): %v", attempt+1, missingIDs)
+			continue
+		}
+
+		// Success! Assign scores based on position in the ranked list
+		var rankedObjects []rankedObject
+		for i, id := range rankedResponse.Objects {
+			for _, obj := range group {
+				if obj.ID == id {
+					rankedObjects = append(rankedObjects, rankedObject{
+						Object: obj,
+						Score:  float64(i + 1), // Score based on position (1 for first, 2 for second, etc.)
+					})
+					break
+				}
+			}
+		}
+
+		return rankedObjects, nil
 	}
 
-	return rankedObjects, nil
+	return nil, fmt.Errorf("failed after %d attempts", maxRetries)
 }
 
 type customTransport struct {
