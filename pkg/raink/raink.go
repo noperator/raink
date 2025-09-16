@@ -32,6 +32,34 @@ const (
 	minBatchSize = 2
 )
 
+// Word lists for generating memorable IDs
+var (
+	adjectives = []string{
+		"apt", "bad", "big", "coy", "dim", "dry", "far", "fat", "fit", "fun",
+		"hip", "hot", "icy", "lax", "low", "mad", "mid", "net", "new", "old",
+		"pat", "raw", "red", "sad", "shy", "tan", "wet",
+	}
+	nouns = []string{
+		"act", "age", "aid", "air", "ant", "ape", "arm", "art", "ash", "bag",
+		"bar", "bat", "bay", "bed", "bet", "bid", "bin", "bit", "bog", "bow",
+		"box", "boy", "bud", "bug", "bun", "bus", "can", "cap", "car", "cat",
+		"cob", "cot", "cow", "cub", "cup", "cut", "dad", "dam", "day", "den",
+		"dew", "dog", "dot", "ear", "elf", "elk", "elm", "emu", "end", "era",
+		"eye", "fan", "fax", "fig", "fix", "flu", "fly", "fob", "fog", "fox",
+		"fur", "gap", "gas", "gem", "gum", "guy", "gym", "hat", "hay", "hen",
+		"hip", "hit", "hog", "hot", "hut", "ice", "ink", "jam", "jar", "jaw",
+		"job", "joy", "jug", "keg", "key", "kid", "lab", "lap", "law", "leg",
+		"lie", "lip", "log", "lot", "man", "map", "mat", "mix", "mom", "mop",
+		"mud", "mug", "net", "nut", "oak", "oar", "oil", "one", "owl", "pad",
+		"pan", "paw", "pea", "pen", "pet", "pew", "pie", "pig", "pin", "pop",
+		"pot", "rag", "ram", "rat", "ray", "rim", "rip", "rod", "row", "rub",
+		"rug", "rum", "run", "saw", "sea", "sir", "sky", "son", "sow", "soy",
+		"spy", "sun", "tax", "tea", "tie", "tin", "tip", "toe", "tom", "ton",
+		"top", "toy", "tub", "urn", "van", "wad", "war", "wax", "way", "web",
+		"yak", "yam",
+	}
+)
+
 /*
 When deciding whether a value belongs in Config or Ranker structs, consider the following:
 - Does this value change during operation? → Ranker if yes, Config if no
@@ -190,6 +218,62 @@ func generateSchema[T any]() interface{} {
 	var v T
 	schema := reflector.Reflect(v)
 	return schema
+}
+
+// createIDMappings generates memorable temporary IDs for a batch of objects
+func createIDMappings(objects []object, rng *rand.Rand, logger *slog.Logger) (map[string]string, map[string]string, error) {
+	originalToTemp := make(map[string]string)
+	tempToOriginal := make(map[string]string)
+	usedCombos := make(map[string]bool)
+
+	maxAttempts := len(adjectives) * len(nouns) * 2 // Allow some randomness
+
+	for _, obj := range objects {
+		attempts := 0
+		found := false
+
+		for attempts < maxAttempts && !found {
+			adj := adjectives[rng.Intn(len(adjectives))]
+			noun := nouns[rng.Intn(len(nouns))]
+			combination := adj + noun
+
+			// Check for consecutively repeated characters
+			hasRepeats := false
+			for i := 0; i < len(combination)-1; i++ {
+				if combination[i] == combination[i+1] {
+					hasRepeats = true
+					break
+				}
+			}
+
+			// If no repeats and not used, use this combination
+			if !hasRepeats && !usedCombos[combination] {
+				usedCombos[combination] = true
+				originalToTemp[obj.ID] = combination
+				tempToOriginal[combination] = obj.ID
+				found = true
+			}
+
+			attempts++
+		}
+
+		if !found {
+			// Fall back to original IDs if we can't generate memorable ones
+			logger.Warn("Failed to generate memorable IDs, falling back to original IDs", "error", "unable to generate unique memorable ID")
+			return nil, nil, fmt.Errorf("unable to generate unique memorable ID after %d attempts", maxAttempts)
+		}
+	}
+
+	return originalToTemp, tempToOriginal, nil
+}
+
+// translateIDsInResponse translates temporary IDs back to original IDs in the response
+func translateIDsInResponse(response *rankedObjectResponse, tempToOriginal map[string]string) {
+	for i, id := range response.Objects {
+		if originalID, exists := tempToOriginal[id]; exists {
+			response.Objects[i] = originalID
+		}
+	}
 }
 
 var rankedObjectResponseSchema = generateSchema[rankedObjectResponse]()
@@ -524,18 +608,15 @@ func (r *Ranker) logTokenSizes(group []object) {
 
 const promptFmt = "id: `%s`\nvalue:\n```\n%s\n```\n\n"
 
-var promptDisclaimer = fmt.Sprintf(
-	"\n\nREMEMBER to:\n"+
-		"- ALWAYS respond with the short %d-character ID of each item found above the value "+
-		"(i.e., I'll provide you with `id: <ID>` above the value, and you should respond with that same ID in your response)\n"+
-		"— NEVER respond with the actual value!\n"+
-		"— NEVER include backticks around IDs in your response!\n"+
-		"— NEVER include scores or a written reason/justification in your response!\n"+
-		"- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT\n"+
-		"- Respond in JSON format, with the following schema:\n  {\"objects\": [\"<ID1>\", \"<ID2>\", ...]}\n\n"+
-		"Here are the objects to be ranked:\n\n",
-	idLen,
-)
+var promptDisclaimer = "\n\nREMEMBER to:\n" +
+	"- ALWAYS respond with the short 6-8 character ID of each item found above the value " +
+	"(i.e., I'll provide you with `id: <ID>` above the value, and you should respond with that same ID in your response)\n" +
+	"— NEVER respond with the actual value!\n" +
+	"— NEVER include backticks around IDs in your response!\n" +
+	"— NEVER include scores or a written reason/justification in your response!\n" +
+	"- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT\n" +
+	"- Respond in JSON format, with the following schema:\n  {\"objects\": [\"<ID1>\", \"<ID2>\", ...]}\n\n" +
+	"Here are the objects to be ranked:\n\n"
 
 const missingIDsStr = "Your last response was missing the following IDs: [%s]. " +
 	"Try again—and make ABSOLUTELY SURE to remember to:\n" +
@@ -566,9 +647,26 @@ func (r *Ranker) estimateTokens(group []object, includePrompt bool) int {
 }
 
 func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]rankedObject, error) {
+	// Try to create memorable ID mappings
+	originalToTemp, tempToOriginal, err := createIDMappings(group, r.rng, r.cfg.Logger)
+	useMemorableIDs := err == nil && originalToTemp != nil && tempToOriginal != nil
+
 	prompt := r.cfg.InitialPrompt + promptDisclaimer
-	for _, obj := range group {
-		prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+	inputIDs := make(map[string]bool)
+
+	if useMemorableIDs {
+		// Use memorable IDs in the prompt
+		for _, obj := range group {
+			tempID := originalToTemp[obj.ID]
+			prompt += fmt.Sprintf(promptFmt, tempID, obj.Value)
+			inputIDs[tempID] = true
+		}
+	} else {
+		// Fall back to original IDs
+		for _, obj := range group {
+			prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+			inputIDs[obj.ID] = true
+		}
 	}
 
 	if r.cfg.DryRun {
@@ -585,11 +683,6 @@ func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]
 	}
 
 	var rankedResponse rankedObjectResponse
-	inputIDs := make(map[string]bool)
-	for _, obj := range group {
-		inputIDs[obj.ID] = true
-	}
-	var err error
 	if r.cfg.OllamaModel != "" {
 		rankedResponse, err = r.callOllama(prompt, runNumber, batchNumber, inputIDs)
 	} else {
@@ -597,6 +690,11 @@ func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Translate temporary IDs back to original IDs if using memorable IDs
+	if useMemorableIDs {
+		translateIDsInResponse(&rankedResponse, tempToOriginal)
 	}
 
 	// Assign scores based on position in the ranked list
