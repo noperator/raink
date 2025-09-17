@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -822,7 +823,8 @@ func validateIDs(rankedResponse *rankedObjectResponse, inputIDs map[string]bool)
 	wrongIDs := []string{}
 
 	for i, id := range rankedResponse.Objects {
-		id = strings.ReplaceAll(id, "`", "")
+		nonAlpha := regexp.MustCompile(`[^a-zA-Z]+`)
+		id := nonAlpha.ReplaceAllString(id, "")
 		lowerID := strings.ToLower(id)
 
 		// Check if this ID returned by the LLM was in the original provided list
