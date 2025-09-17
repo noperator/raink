@@ -637,6 +637,7 @@ const rankPrompt = `%s
 
 Your job here is to RANK the incoming objects in DESCENDING order, where the FIRST item in your response is the MOST RELEVANT.
 Rather than returning the full contents of each object, you'll simply return the SHORT ID (usually 6-8 chars) associated with each object (think of it like a simple "pointer" to the object).
+Note that this predetermined ID string is randomly assigned and is not related to the actual object value.
 You'll return these identifiers in the following JSON schema: {"objects": ["<ID1>", "<ID2>", ...]}
 
 Here are the objects to be ranked:
