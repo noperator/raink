@@ -879,7 +879,10 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 	}
 
 	var rankedResponse rankedObjectResponse
-	for {
+	maxRetries := 3
+	attempts := 0
+	for attempts < maxRetries {
+		attempts++
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -906,6 +909,9 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 			err = json.Unmarshal([]byte(completion.Choices[0].Message.Content), &rankedResponse)
 			if err != nil {
 				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+				if attempts >= maxRetries {
+					return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts: invalid JSON response", maxRetries)
+				}
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(invalidJSONStr),
 				)
@@ -917,6 +923,9 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 			missingIDs, wrongIDs, err := validateIDs(&rankedResponse, inputIDs)
 			if err != nil {
 				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s] Wrong IDs: [%s]", strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", ")))
+				if attempts >= maxRetries {
+					return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts: missing %v, wrong %v", maxRetries, missingIDs, wrongIDs)
+				}
 				conversationHistory = append(conversationHistory,
 					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", "), reminders)),
 				)
@@ -971,6 +980,7 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 			return rankedObjectResponse{}, fmt.Errorf("run %*d/%d, batch %*d/%d: unexpected error: %w", len(strconv.Itoa(r.cfg.NumRuns)), runNum, r.cfg.NumRuns, len(strconv.Itoa(r.numBatches)), batchNum, r.numBatches, err)
 		}
 	}
+	return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts", maxRetries)
 }
 
 func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs map[string]bool) (rankedObjectResponse, error) {
@@ -982,7 +992,10 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 		{"role": "user", "content": prompt},
 	}
 
-	for {
+	maxRetries := 3
+	attempts := 0
+	for attempts < maxRetries {
+		attempts++
 
 		requestBody, err := json.Marshal(map[string]interface{}{
 			"model":    r.cfg.OllamaModel,
@@ -1041,6 +1054,9 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 		err = json.Unmarshal([]byte(ollamaResponse.Message.Content), &rankedResponse)
 		if err != nil {
 			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Error unmarshalling response: %v\n", err))
+			if attempts >= maxRetries {
+				return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts: invalid JSON response", maxRetries)
+			}
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
@@ -1055,6 +1071,9 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 		missingIDs, wrongIDs, err := validateIDs(&rankedResponse, inputIDs)
 		if err != nil {
 			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s] Wrong IDs: [%s]", strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", ")))
+			if attempts >= maxRetries {
+				return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts: missing %v, wrong %v", maxRetries, missingIDs, wrongIDs)
+			}
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
@@ -1068,4 +1087,5 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 
 		return rankedResponse, nil
 	}
+	return rankedObjectResponse{}, fmt.Errorf("failed after %d conversation attempts", maxRetries)
 }
