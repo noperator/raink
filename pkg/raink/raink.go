@@ -613,36 +613,59 @@ func (r *Ranker) logTokenSizes(group []object) {
 	}
 }
 
-const promptFmt = "id: `%s`\nvalue:\n```\n%s\n```\n\n"
+const objectFmt = `
+<object>
+<id>
+%s
+</id>
+<value>
+%s
+</value>
+</object>
+`
 
-var promptDisclaimer = "\n\nREMEMBER to:\n" +
-	"- ALWAYS respond with the short 6-8 character ID of each item found above the value " +
-	"(i.e., I'll provide you with `id: <ID>` above the value, and you should respond with that same ID in your response)\n" +
-	"— NEVER respond with the actual value!\n" +
-	"— NEVER include backticks around IDs in your response!\n" +
-	"— NEVER include scores or a written reason/justification in your response!\n" +
-	"- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT\n" +
-	"- Respond in JSON format, with the following schema:\n  {\"objects\": [\"<ID1>\", \"<ID2>\", ...]}\n\n" +
-	"Here are the objects to be ranked:\n\n"
+const reminders = `- ALWAYS respond with the SHORT ID associated with each object!
+— NEVER respond with the actual value!
+- ALWAYS respond in JSON format as specified! {"objects": ["<ID1>", "<ID2>", ...]}
+- Respond in RANKED DESCENDING order, where the FIRST item in your response is the MOST RELEVANT!
+- ALWAYS return ALL of the IDs in the list!
+- NEVER include backticks around IDs in your response!
+— NEVER include scores or a written reason/justification in your response!`
 
-const missingIDsStr = "Your last response was missing the following IDs: [%s]. " +
-	"Try again—and make ABSOLUTELY SURE to remember to:\n" +
-	"- ALWAYS return the IDs and NOT THE VALUES! " +
-	"- ALWAYS respond in JSON format as specified! " +
-	"- ALWAYS return ALL of the IDs in the list!" +
-	"- NEVER include backticks around IDs in your response!" +
-	"— NEVER include scores or a written reason/justification in your response!"
+const rankPrompt = `%s
+
+Your job here is to RANK the incoming objects in DESCENDING order, where the FIRST item in your response is the MOST RELEVANT.
+Rather than returning the full contents of each object, you'll simply return the SHORT ID (usually 6-8 chars) associated with each object (think of it like a simple "pointer" to the object).
+You'll return these identifiers in the following JSON schema: {"objects": ["<ID1>", "<ID2>", ...]}
+
+Here are the objects to be ranked:
+<objects>
+%s
+</objects>
+
+Let me remind you to be ABSOLUTELY SURE to:
+%s`
+
+const missingIDsStr = `Your last response was invalid for these reasons:
+- You did not provide the following required IDs: [%s]
+- You mistakenly provided the following invalid IDs: [%s]. (If this is empty, then just focus on the missing IDs.)
+
+Try again, and make ABSOLUTELY SURE to remember to:
+%s`
 
 const invalidJSONStr = "Your last response was not valid JSON. Try again!"
 
 func (r *Ranker) estimateTokens(group []object, includePrompt bool) int {
-	text := ""
+	initPrompt := ""
 	if includePrompt {
-		text += r.cfg.InitialPrompt + promptDisclaimer
+		initPrompt = r.cfg.InitialPrompt
 	}
+	objectData := ""
 	for _, obj := range group {
-		text += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+		objectData += fmt.Sprintf(objectFmt, obj.ID, obj.Value)
 	}
+
+	text := fmt.Sprintf(rankPrompt, initPrompt, objectData, reminders)
 
 	if r.cfg.OllamaModel != "" {
 		// TODO: Update to use Ollama tokenize API when this PR is merged:
@@ -673,23 +696,25 @@ func (r *Ranker) rankObjects(group []object, runNumber int, batchNumber int) ([]
 		originalToTemp, tempToOriginal, err := createIDMappings(group, r.rng, r.cfg.Logger)
 		useMemorableIDs := err == nil && originalToTemp != nil && tempToOriginal != nil
 
-		prompt := r.cfg.InitialPrompt + promptDisclaimer
 		inputIDs := make(map[string]bool)
 
+		objectData := ""
 		if useMemorableIDs {
 			// Use memorable IDs in the prompt
 			for _, obj := range group {
 				tempID := originalToTemp[obj.ID]
-				prompt += fmt.Sprintf(promptFmt, tempID, obj.Value)
+				objectData += fmt.Sprintf(objectFmt, tempID, obj.Value)
 				inputIDs[tempID] = true
 			}
 		} else {
 			// Fall back to original IDs
 			for _, obj := range group {
-				prompt += fmt.Sprintf(promptFmt, obj.ID, obj.Value)
+				objectData += fmt.Sprintf(objectFmt, obj.ID, obj.Value)
 				inputIDs[obj.ID] = true
 			}
 		}
+
+		prompt := fmt.Sprintf(rankPrompt, r.cfg.InitialPrompt, objectData, reminders)
 
 		var rankedResponse rankedObjectResponse
 		if r.cfg.OllamaModel != "" {
@@ -779,38 +804,48 @@ func (t *customTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // validateIDs updates the rankedResponse in place to fix case-insensitive ID mismatches.
 // If any IDs are missing, returns the missing IDs along with an error.
-func validateIDs(rankedResponse *rankedObjectResponse, inputIDs map[string]bool) ([]string, error) {
+func validateIDs(rankedResponse *rankedObjectResponse, inputIDs map[string]bool) ([]string, []string, error) {
 	// Create a map for case-insensitive ID matching
 	inputIDsLower := make(map[string]string)
 	for id := range inputIDs {
 		inputIDsLower[strings.ToLower(id)] = id
 	}
 
+	// IDs that were in the original provided list, but not returned by the LLM
+	// Start by assuming that all IDs are missing, then prove wrong
 	missingIDs := make(map[string]bool)
 	for id := range inputIDs {
 		missingIDs[id] = true
 	}
 
+	// IDs returned by the LLM that weren't in the original provided list
+	wrongIDs := []string{}
+
 	for i, id := range rankedResponse.Objects {
 		id = strings.ReplaceAll(id, "`", "")
 		lowerID := strings.ToLower(id)
+
+		// Check if this ID returned by the LLM was in the original provided list
 		if correctID, found := inputIDsLower[lowerID]; found {
 			if correctID != id {
 				// Replace the case-wrong match with the correct ID
 				rankedResponse.Objects[i] = correctID
 			}
 			delete(missingIDs, correctID)
+		} else {
+			wrongIDs = append(wrongIDs, id)
 		}
 	}
 
+	// If we got back all the IDs we needed, then it doesn't matter if it returned extra "wrong" IDs
 	if len(missingIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	} else {
 		missingIDsKeys := make([]string, 0, len(missingIDs))
 		for id := range missingIDs {
 			missingIDsKeys = append(missingIDsKeys, id)
 		}
-		return missingIDsKeys, fmt.Errorf("missing IDs: %s", strings.Join(missingIDsKeys, ", "))
+		return missingIDsKeys, wrongIDs, fmt.Errorf("missing IDs: %s; wrong IDs: %s", strings.Join(missingIDsKeys, ", "), strings.Join(wrongIDs, ", "))
 	}
 }
 
@@ -879,11 +914,11 @@ func (r *Ranker) callOpenAI(prompt string, runNum int, batchNum int, inputIDs ma
 				continue
 			}
 
-			missingIDs, err := validateIDs(&rankedResponse, inputIDs)
+			missingIDs, wrongIDs, err := validateIDs(&rankedResponse, inputIDs)
 			if err != nil {
-				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+				r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s] Wrong IDs: [%s]", strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", ")))
 				conversationHistory = append(conversationHistory,
-					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "))),
+					openai.UserMessage(fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", "), reminders)),
 				)
 				trimmedContent := strings.TrimSpace(completion.Choices[0].Message.Content)
 				r.cfg.Logger.Debug("OpenAI API response", "content", trimmedContent)
@@ -1017,13 +1052,13 @@ func (r *Ranker) callOllama(prompt string, runNum int, batchNum int, inputIDs ma
 			continue
 		}
 
-		missingIDs, err := validateIDs(&rankedResponse, inputIDs)
+		missingIDs, wrongIDs, err := validateIDs(&rankedResponse, inputIDs)
 		if err != nil {
-			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s]", strings.Join(missingIDs, ", ")))
+			r.logFromApiCall(runNum, batchNum, fmt.Sprintf("Missing IDs: [%s] Wrong IDs: [%s]", strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", ")))
 			conversationHistory = append(conversationHistory,
 				map[string]interface{}{
 					"role":    "user",
-					"content": fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", ")),
+					"content": fmt.Sprintf(missingIDsStr, strings.Join(missingIDs, ", "), strings.Join(wrongIDs, ", "), reminders),
 				},
 			)
 			trimmedContent := strings.TrimSpace(ollamaResponse.Message.Content)
