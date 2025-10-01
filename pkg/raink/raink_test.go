@@ -17,16 +17,14 @@ func TestNewRanker(t *testing.T) {
 		{
 			name: "valid config",
 			config: &Config{
-				InitialPrompt:   "test prompt",
-				BatchSize:       5,
-				NumRuns:         2,
-				OpenAIModel:     openai.ChatModelGPT4oMini,
-				TokenLimit:      1000,
-				RefinementRatio: 0.5,
-				OpenAIKey:       "test-key",
-				Encoding:        "o200k_base",
-				BatchTokens:     2000,
-				DryRun:          true,
+				InitialPrompt: "test prompt",
+				BatchSize:     5,
+				OpenAIModel:   openai.ChatModelGPT4oMini,
+				TokenLimit:    1000,
+				OpenAIKey:     "test-key",
+				Encoding:      "o200k_base",
+				BatchTokens:   2000,
+				DryRun:        true,
 			},
 			wantErr: false,
 		},
@@ -35,7 +33,6 @@ func TestNewRanker(t *testing.T) {
 			config: &Config{
 				InitialPrompt: "",
 				BatchSize:     5,
-				NumRuns:       2,
 				OpenAIModel:   openai.ChatModelGPT4oMini,
 				TokenLimit:    1000,
 				OpenAIKey:     "test-key",
@@ -48,7 +45,6 @@ func TestNewRanker(t *testing.T) {
 			config: &Config{
 				InitialPrompt: "test",
 				BatchSize:     1, // Less than minBatchSize (2)
-				NumRuns:       2,
 				OpenAIModel:   openai.ChatModelGPT4oMini,
 				TokenLimit:    1000,
 				OpenAIKey:     "test-key",
@@ -61,7 +57,6 @@ func TestNewRanker(t *testing.T) {
 			config: &Config{
 				InitialPrompt: "test",
 				BatchSize:     5,
-				NumRuns:       2,
 				OpenAIModel:   openai.ChatModelGPT4oMini,
 				TokenLimit:    1000,
 				OpenAIKey:     "", // Empty key
@@ -101,16 +96,14 @@ func TestRankFromFile_DryRun(t *testing.T) {
 	}
 
 	config := &Config{
-		InitialPrompt:   "Rank by alphabetical order",
-		BatchSize:       3, // Set to 3 to include all items
-		NumRuns:         1,
-		OpenAIModel:     openai.ChatModelGPT4oMini,
-		TokenLimit:      1000,
-		RefinementRatio: 0.0, // Set to 0.0 to disable refinement and keep all results
-		OpenAIKey:       "test-key",
-		Encoding:        "o200k_base",
-		BatchTokens:     2000,
-		DryRun:          true, // Use dry run to avoid actual API calls
+		InitialPrompt: "Rank by alphabetical order",
+		BatchSize:     3, // Set to 3 to include all items
+		OpenAIModel:   openai.ChatModelGPT4oMini,
+		TokenLimit:    1000,
+		OpenAIKey:     "test-key",
+		Encoding:      "o200k_base",
+		BatchTokens:   2000,
+		DryRun:        true, // Use dry run to avoid actual API calls
 	}
 
 	ranker, err := NewRanker(config)
@@ -169,16 +162,14 @@ func TestRankFromFile_WithSentencesData(t *testing.T) {
 	}
 
 	config := &Config{
-		InitialPrompt:   `Rank each of these items according to their relevancy to the concept of "time".`,
-		BatchSize:       10,
-		NumRuns:         3,
-		OpenAIModel:     openai.ChatModelGPT4oMini,
-		TokenLimit:      100000,
-		RefinementRatio: 0.5,
-		OpenAIKey:       "test-key", // This would normally come from environment
-		Encoding:        "o200k_base",
-		BatchTokens:     128000,
-		DryRun:          true, // Use dry run to avoid actual API calls
+		InitialPrompt: `Rank each of these items according to their relevancy to the concept of "time".`,
+		BatchSize:     10,
+		OpenAIModel:   openai.ChatModelGPT4oMini,
+		TokenLimit:    100000,
+		OpenAIKey:     "test-key", // This would normally come from environment
+		Encoding:      "o200k_base",
+		BatchTokens:   128000,
+		DryRun:        true, // Use dry run to avoid actual API calls
 	}
 
 	// Allow integration testing with real OpenAI API if API key is provided
@@ -272,16 +263,14 @@ func TestRankFromFile_WithSentencesData(t *testing.T) {
 
 func TestRankFromFile_Errors(t *testing.T) {
 	config := &Config{
-		InitialPrompt:   "test prompt",
-		BatchSize:       5,
-		NumRuns:         3,
-		OpenAIModel:     openai.ChatModelGPT4oMini,
-		TokenLimit:      1000,
-		RefinementRatio: 0.5,
-		OpenAIKey:       "test-key",
-		Encoding:        "o200k_base",
-		BatchTokens:     2000,
-		DryRun:          true,
+		InitialPrompt: "test prompt",
+		BatchSize:     5,
+		OpenAIModel:   openai.ChatModelGPT4oMini,
+		TokenLimit:    1000,
+		OpenAIKey:     "test-key",
+		Encoding:      "o200k_base",
+		BatchTokens:   2000,
+		DryRun:        true,
 	}
 
 	ranker, err := NewRanker(config)
